@@ -13,7 +13,6 @@ function getSessionSecret() {
   return secret;
 }
 
-const SESSION_SECRET = getSessionSecret();
 const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
 
 type WalletSessionPayload = {
@@ -30,7 +29,9 @@ function base64UrlDecode(value: string) {
 }
 
 function sign(value: string) {
-  return createHmac("sha256", SESSION_SECRET).update(value).digest("base64url");
+  return createHmac("sha256", getSessionSecret())
+    .update(value)
+    .digest("base64url");
 }
 
 export function createWalletSessionToken(wallet: string) {
