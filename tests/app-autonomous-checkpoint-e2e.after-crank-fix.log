@@ -1,0 +1,325 @@
+(node:17374) ExperimentalWarning: `--experimental-loader` may be removed in the future; instead use `register()`:
+--import 'data:text/javascript,import { register } from "node:module"; import { pathToFileURL } from "node:url"; register("./tests/alias-loader.mjs", pathToFileURL("./"));'
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:17374) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///Users/sumangiri/Desktop/expensee/tests/app-autonomous-checkpoint-e2e.ts is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /Users/sumangiri/Desktop/expensee/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+bigint: Failed to load bindings, pure JS will be used (try npm run rebuild?)
+=== Autonomous Checkpoint Devnet E2E ===
+Employer wallet: 2QrwExUdu93o8mSdfEh6kvbNLTbN1UnVRrfyjQsDSUPE
+Employee wallet: H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr
+Employer keypair: /Users/sumangiri/Desktop/Homie/keys/payroll-authority.json
+
+=== Preflight ===
+[PER] balance response: {
+  "address": "2QrwExUdu93o8mSdfEh6kvbNLTbN1UnVRrfyjQsDSUPE",
+  "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  "ata": "F3fmFt5dVqVQ6PFvtvSv1UXmuAT8NPFcKym8KoTnFWsW",
+  "location": "base",
+  "balance": "309965"
+}
+Employer SOL: 31.1939
+Employer base USDC: 0.309965 USDC
+Funding H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr with 0.200 SOL from employer wallet
+[PER] balance response: {
+  "address": "H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr",
+  "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  "ata": "BDLBRe7J14LV8HreM957A9Sn2qmdScddjkAM92FcqRi6",
+  "location": "base",
+  "balance": "0"
+}
+Funding H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr with 0.000001 base USDC for self-init precondition
+Employee base USDC top-up signature: 5cqZSfBW2iJteJqdQ2igdz9AhYZo25y1RNoZwV9o7MZrzwUBBSWmviuPyigJW6hB2TP5eWrdsHK1c9B8rX8GJdJb
+[PER] balance response: {
+  "address": "H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr",
+  "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  "ata": "BDLBRe7J14LV8HreM957A9Sn2qmdScddjkAM92FcqRi6",
+  "location": "base",
+  "balance": "1"
+}
+[PER] TEE auth token acquired — expires in 2592000 seconds (at 3:42:02 AM)
+[PER] TEE auth token acquired — expires in 2592000 seconds (at 3:42:03 AM)
+Employer TEE auth acquired
+Employee TEE auth acquired
+
+=== Create employee ===
+Employee created: {
+  id: 'a5ecda3a-be6b-49be-b4cb-b7141400a383',
+  employerWallet: '2QrwExUdu93o8mSdfEh6kvbNLTbN1UnVRrfyjQsDSUPE',
+  wallet: 'H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr',
+  name: 'Autonomous Checkpoint 0241aed0',
+  notes: 'Created by autonomous checkpoint e2e runner',
+  privateRecipientInitializedAt: null,
+  createdAt: '2026-04-21T21:57:04.161Z',
+  updatedAt: '2026-04-21T21:57:04.161Z',
+  _id: '69e7f2b0dab240b01313dec5'
+}
+
+=== Create paused stream ===
+Stream created: {
+  id: '7832998c-5c55-496c-a39a-01247b310afe',
+  employerWallet: '2QrwExUdu93o8mSdfEh6kvbNLTbN1UnVRrfyjQsDSUPE',
+  employeeId: 'a5ecda3a-be6b-49be-b4cb-b7141400a383',
+  ratePerSecond: 0.02,
+  delegatedAt: null,
+  recipientPrivateInitializedAt: null,
+  checkpointCrankTaskId: null,
+  checkpointCrankSignature: null,
+  checkpointCrankStatus: 'idle',
+  checkpointCrankUpdatedAt: null,
+  lastPaidAt: null,
+  totalPaid: 0,
+  status: 'paused',
+  createdAt: '2026-04-21T21:57:04.464Z',
+  updatedAt: '2026-04-21T21:57:04.464Z',
+  _id: '69e7f2b0dab240b01313dec6'
+}
+
+=== Build onboarding transactions ===
+Onboarding build: {
+  employeePda: '4SEFXhvjS7p1GdDXXtFFhTGhf7xD4mbN5Q3WMsYrwi5w',
+  privatePayrollPda: 'eyiycT65pqRznA7BHUdGCNR1cwHQY2ekbpgUBv55mmW',
+  permissionPda: '2DTin8X6TkJuufupizkn9D4saG4f3EWDV6t4YZgfB8ad',
+  alreadyOnboarded: false
+}
+
+=== Sign and send onboarding transactions ===
+Sending onboard:createEmployee tx -> base
+Sending onboard:createPermission tx -> base
+Sending onboard:delegateBundle tx -> base
+Waiting for delegation to settle...
+Sending onboard:initializePrivatePayroll tx -> ephemeral
+[PER] Ephemeral: trying signTransaction...
+[PER] Ephemeral tx sent via signTransaction: 5kPkwHLSkJpRfAURvBGFoReFBWjcMx9Pg1qBHb4rRMmxHZn6sczF1qBXcfCn5C16EYAzdQmReW2CStGpoWvYx7nW
+Onboarding signatures: {
+  createEmployeeSignature: '2dY6SCuDaa2dJpMWttbiouZRBGSK5iBbcdGEfeh2L6mFCzUxLQYYhoLkGh81gkV1D2BZKJ3mzN6mQ622JMAqm4oi',
+  createPermissionSignature: '45mFPe6Uv9LsWgvmw1Hr34oD7EFy6YUXDfCekcYGV4kaAowaQCgvEXrkvk61F69eW1bDVFYmMLoAF9M6KEzfmQp2',
+  delegateBundleSignature: '36FF9KMaBhrgaLJsJhd8unVf3f4kQgKzQm6jUxCUCh3QWKztr8N1pdZyvwi2PivvRWXyzfQ26d43R2LUy6dBWtzF',
+  initializePrivatePayrollSignature: '5kPkwHLSkJpRfAURvBGFoReFBWjcMx9Pg1qBHb4rRMmxHZn6sczF1qBXcfCn5C16EYAzdQmReW2CStGpoWvYx7nW'
+}
+
+=== Finalize onboarding metadata ===
+Onboard finalize: {
+  _id: '69e7f2b0dab240b01313dec6',
+  id: '7832998c-5c55-496c-a39a-01247b310afe',
+  employerWallet: '2QrwExUdu93o8mSdfEh6kvbNLTbN1UnVRrfyjQsDSUPE',
+  employeeId: 'a5ecda3a-be6b-49be-b4cb-b7141400a383',
+  ratePerSecond: 0.02,
+  employeePda: '4SEFXhvjS7p1GdDXXtFFhTGhf7xD4mbN5Q3WMsYrwi5w',
+  privatePayrollPda: 'eyiycT65pqRznA7BHUdGCNR1cwHQY2ekbpgUBv55mmW',
+  permissionPda: '2DTin8X6TkJuufupizkn9D4saG4f3EWDV6t4YZgfB8ad',
+  delegatedAt: '2026-04-21T21:57:13.002Z',
+  recipientPrivateInitializedAt: null,
+  checkpointCrankTaskId: null,
+  checkpointCrankSignature: null,
+  checkpointCrankStatus: 'idle',
+  checkpointCrankUpdatedAt: null,
+  lastPaidAt: null,
+  totalPaid: 0,
+  status: 'paused',
+  createdAt: '2026-04-21T21:57:04.464Z',
+  updatedAt: '2026-04-21T21:57:13.061Z'
+}
+
+=== Employee self-initializes private account ===
+[PER] deposit response: {
+  "kind": "deposit",
+  "version": "legacy",
+  "transactionBase64": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAYZ7p28NXrBi2//6kQMgfSN2FHmZYhJrjxSlMklmCHqiC0AkJSOGTStLfsW55EW6zUIxjiTFIAzB/WNrfvk8iyxvBu57Nu45KdoNhwlipbfGR+jk248VRKuXa3Jq+BBGSvnJ9hee3cHkrbpWzapgYP+gjpFqC6qCeHn17EBI7cojpsitZb4L+9yPp61Jvj+/e9xwcuxSbdI9LNwstuAKIG61jL1oj5XcVtBmTtxw3BoGQUa+yT2b46gP7bfxhek4wxlPanvvtfyStNFbqzCkKbEfiYatnTQoEO3A4zIMtjp4pQ/vTXTkNX3mwksI/JRpA/wP1NJuqmcj9QzxTqsTMHEHkocFUo0Ps7wfOWaKIkMBuOMkUXcl2JIKu7KoN+0ulQmTD5ZDEbWzYsvKdA0QHtp9vrYDRb9Vvyuk0CgSL9x/MmGoSVacidompFTEUoJG4LvpLF9FKdexxWioKzBuNQv94iCRM5k7Wou0WfNgY+dgjrYtTWFu5gP0XoScv3yjvAJl72Gi94i5+uwAFbuU1o0ZuyUQuRDuDqXTpTHTguwOF+mGvx8tMWeVozbZuZdk6qS+O6a1QJzHmS+e0Ej8qvpI7tdsKaKGF4UJBxbCjnORnVK1H2wyg9wMbGVAwnj6uWiy8iPmoc4Xoz9sw9k+V6Uqm1XS6X1NMo8UUro/yaUKdvTMnpkUDOLCKBHSGzHXJaudubzxUqojeOnF5SWV3u0YOTjPHlneQK2tg85REx3n7rxhExp3asHjtli6IzFVxFWBrjkdQ99hcQxA2thKEBta/Fz9iM4alrV4VWMatpy/fkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADtELLORIVfxOpM9ATQoLQMrX/7NAaLb8bd5BgjfAC6njJclj04kifG7PRApFI4NgwtaE5na/xCEBI572Nvp+Fm1twDh8lc6wMwGIgE0Ss+XuDUG64zlGZjMYn4Yk4CnPgaAyOpzyqzhHfDBuMDlL60R6ixsAMKAfeDvBuWHx19HBt324ddloZPZy+FGzut5rBy0he1fWzeROoz1hX7/AKnMKwOrjLGYHjgau96acwKa7HwZBlpYrlT/WxQfSy8P9gcXCA8AFAoSGBUTAQEVBgASDxQTGAEBFwgAChcLBg0WEyEEBSpHq4N6tgw92J/EyEphniqMUi8/gYj+4kOKWKl2F7IVBgAMABQTGAEBFwUJAAAUEwEAFwgACRcOBAMWEyEEBSpHq4N6tgw92J/EyEphniqMUi8/gYj+4kOKWKl2F7IXEwAFAhEQABcBCAcWFRMMFBgPDBItGNLi6jUBAAAAAAAAAAUqR6uDerYMPdifxMhKYZ4qjFIvP4GI/uJDilipdhey",
+  "sendTo": "base",
+  "recentBlockhash": "EjzDKegY8vmgHVNWsa53D54vnEhR67KUHxsYfefk6n69",
+  "lastValidBlockHeight": 445024206,
+  "instructionCount": 7,
+  "requiredSigners": [
+    "H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr"
+  ],
+  "validator": "MAS1Dt9qreoRMQ14YQuhg8UTZMMzDdKhmkZMECCzk57"
+}
+Sending employee:initPrivateAccount tx -> base
+[PER] private-balance: address: H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr | token present: YES | token length: 203 | token prefix: eyJ0eXAiOi...
+[PER] private-balance OK — location: ephemeral | balance: 1 | address: H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr | ata: BDLBRe7J14LV8HreM957A9Sn2qmdScddjkAM92FcqRi6
+Employee private init: {
+  employeePrivateInitSignature: '4pkD1C9vCfTB776bG1jCBQykhGxGvCJVWCnEgp2KmHmX9DPuuoMvWwwLgQZqSNwhUsezL3nE9Bqo8aYqcR66J59B',
+  initializedAt: '2026-04-21T21:57:14.431Z',
+  privateBalance: '1'
+}
+
+=== Read exact initial payroll state ===
+Exact state before resume: {
+  label: 'before-resume',
+  syncedAt: '2026-04-21T21:57:15.153Z',
+  streamStatus: 'paused',
+  lastAccrualTimestamp: '1776808632',
+  accruedUnpaidMicro: '0',
+  accruedUnpaidUi: '0.000000',
+  totalPaidPrivateMicro: '0'
+}
+
+=== Resume stream and schedule checkpoint crank ===
+
+=== Control action: resume ===
+Sending resume:control tx -> ephemeral
+[PER] Ephemeral: trying signTransaction...
+[PER] Ephemeral tx sent via signTransaction: 5LbXiH8dR29c9peoENWux3UFVpfqW4TT2mYNwkzxzzJUrncCvcY95fEzsY6rZ6DfZaKozrfnirwSfTZi43BvwF5g
+Sending resume:commit tx -> ephemeral
+[PER] Ephemeral: trying signTransaction...
+[PER] Ephemeral tx sent via signTransaction: 5zXrrb6KRVf3tDcth18gHbuQR5fPdeHeKZ8bpPScARpJAAdUuvBfnaTY1gYe1veauEUoRPSDBxXrBnbue92TNH8r
+resume complete: {
+  controlSignature: '5LbXiH8dR29c9peoENWux3UFVpfqW4TT2mYNwkzxzzJUrncCvcY95fEzsY6rZ6DfZaKozrfnirwSfTZi43BvwF5g',
+  commitSignature: '5zXrrb6KRVf3tDcth18gHbuQR5fPdeHeKZ8bpPScARpJAAdUuvBfnaTY1gYe1veauEUoRPSDBxXrBnbue92TNH8r',
+  streamStatus: 'active',
+  ratePerSecond: 0.02
+}
+
+=== Checkpoint crank: schedule ===
+Sending checkpoint-crank:schedule tx -> ephemeral
+[PER] Ephemeral: trying signTransaction...
+[PER] Ephemeral tx sent via signTransaction: 3ottXyuNzf5j2GPqiVL8x6ubcCv4zMUviFQfdmks2wJLUxJVKMCE7JX9RNQe5W8FGyapY1vJdP3RKKyutTXfjVsK
+checkpoint crank schedule complete: {
+  signature: '3ottXyuNzf5j2GPqiVL8x6ubcCv4zMUviFQfdmks2wJLUxJVKMCE7JX9RNQe5W8FGyapY1vJdP3RKKyutTXfjVsK',
+  taskId: '7149527326268799031',
+  checkpointCrankTaskId: '7149527326268799031',
+  checkpointCrankStatus: 'active'
+}
+Exact state immediately after resume: {
+  label: 'after-resume',
+  syncedAt: '2026-04-21T21:57:20.036Z',
+  streamStatus: 'active',
+  lastAccrualTimestamp: '1776808638',
+  accruedUnpaidMicro: '60000',
+  accruedUnpaidUi: '0.060000',
+  totalPaidPrivateMicro: '0'
+}
+
+=== Direct checkpoint smoke test ===
+Sending checkpoint:direct tx -> ephemeral
+[PER] Ephemeral: trying signTransaction...
+[PER] Ephemeral tx sent via signTransaction: 5sW7jhAPd8QNMeQjjkcA7fQwS9emw1QM9D3HAf7gBDPF3UwT41MSyPcVBRhqWBQq64k7ei7AAV6GVg1cQNvxnVbF
+Direct checkpoint result: {
+  signature: '5sW7jhAPd8QNMeQjjkcA7fQwS9emw1QM9D3HAf7gBDPF3UwT41MSyPcVBRhqWBQq64k7ei7AAV6GVg1cQNvxnVbF',
+  before: {
+    label: 'before-direct',
+    syncedAt: '2026-04-21T21:57:20.036Z',
+    streamStatus: 'active',
+    lastAccrualTimestamp: '1776808638',
+    accruedUnpaidMicro: '60000',
+    accruedUnpaidUi: '0.060000',
+    totalPaidPrivateMicro: '0'
+  },
+  after: {
+    label: 'after-direct',
+    syncedAt: '2026-04-21T21:57:21.243Z',
+    streamStatus: 'active',
+    lastAccrualTimestamp: '1776808640',
+    accruedUnpaidMicro: '100000',
+    accruedUnpaidUi: '0.100000',
+    totalPaidPrivateMicro: '0'
+  },
+  deltaLastAccrualTimestamp: '2',
+  deltaAccruedUnpaidMicro: '40000'
+}
+
+=== Wait for autonomous checkpoint ===
+[poll:autonomous-checkpoint] 1/15 {
+  label: 'latest',
+  syncedAt: '2026-04-21T21:57:24.759Z',
+  streamStatus: 'active',
+  lastAccrualTimestamp: '1776808644',
+  accruedUnpaidMicro: '180000',
+  accruedUnpaidUi: '0.180000',
+  totalPaidPrivateMicro: '0'
+}
+Autonomous checkpoint observed: {
+  before: {
+    label: 'baseline',
+    syncedAt: '2026-04-21T21:57:21.243Z',
+    streamStatus: 'active',
+    lastAccrualTimestamp: '1776808640',
+    accruedUnpaidMicro: '100000',
+    accruedUnpaidUi: '0.100000',
+    totalPaidPrivateMicro: '0'
+  },
+  after: {
+    label: 'autonomous',
+    syncedAt: '2026-04-21T21:57:24.759Z',
+    streamStatus: 'active',
+    lastAccrualTimestamp: '1776808644',
+    accruedUnpaidMicro: '180000',
+    accruedUnpaidUi: '0.180000',
+    totalPaidPrivateMicro: '0'
+  },
+  deltaLastAccrualTimestamp: '4',
+  deltaAccruedUnpaidMicro: '80000'
+}
+
+=== Pause stream and cancel checkpoint crank ===
+
+=== Control action: pause ===
+Sending pause:control tx -> ephemeral
+[PER] Ephemeral: trying signTransaction...
+[PER] Ephemeral tx sent via signTransaction: 3zyfEMy6KKoQXyfauBwpJM8MmFC9Ut8BLPexivrtBNCpARZFPQNJmUb1BmLZWe2kQ7tYqsMBzzDEYkfkwReWkaHY
+Sending pause:commit tx -> ephemeral
+[PER] Ephemeral: trying signTransaction...
+[PER] Ephemeral tx sent via signTransaction: 4KQSXzcgaLCSgDKqEmb6hmGShBSecdfANmgze8oTbWQWFGQXDUB1VrvppLFC8c2wzn4eo6u48HnCDkRaegNryKLA
+pause complete: {
+  controlSignature: '3zyfEMy6KKoQXyfauBwpJM8MmFC9Ut8BLPexivrtBNCpARZFPQNJmUb1BmLZWe2kQ7tYqsMBzzDEYkfkwReWkaHY',
+  commitSignature: '4KQSXzcgaLCSgDKqEmb6hmGShBSecdfANmgze8oTbWQWFGQXDUB1VrvppLFC8c2wzn4eo6u48HnCDkRaegNryKLA',
+  streamStatus: 'paused',
+  ratePerSecond: 0.02
+}
+
+=== Checkpoint crank: cancel ===
+Sending checkpoint-crank:cancel tx -> ephemeral
+[PER] Ephemeral: trying signTransaction...
+[PER] Ephemeral tx sent via signTransaction: 4xjKT9XM9Phmf2nsD3BZMhrybguVZhAiKEFC7oLuufuC9QbFHaBa3bbAsUyRdWSMg71M45ym1c73F6rc96RQ1J9i
+checkpoint crank cancel complete: {
+  signature: '4xjKT9XM9Phmf2nsD3BZMhrybguVZhAiKEFC7oLuufuC9QbFHaBa3bbAsUyRdWSMg71M45ym1c73F6rc96RQ1J9i',
+  taskId: '7149527326268799031',
+  checkpointCrankTaskId: null,
+  checkpointCrankStatus: 'stopped'
+}
+
+=== Verify no further autonomous checkpoint after cancel ===
+Exact state after pause: {
+  label: 'after-pause',
+  syncedAt: '2026-04-21T21:57:29.803Z',
+  streamStatus: 'paused',
+  lastAccrualTimestamp: '1776808645',
+  accruedUnpaidMicro: '200000',
+  accruedUnpaidUi: '0.200000',
+  totalPaidPrivateMicro: '0'
+}
+State after cancel wait: {
+  label: 'after-cancel',
+  syncedAt: '2026-04-21T21:57:36.735Z',
+  streamStatus: 'paused',
+  lastAccrualTimestamp: '1776808645',
+  accruedUnpaidMicro: '200000',
+  accruedUnpaidUi: '0.200000',
+  totalPaidPrivateMicro: '0'
+}
+
+=== Summary ===
+{
+  employerWallet: '2QrwExUdu93o8mSdfEh6kvbNLTbN1UnVRrfyjQsDSUPE',
+  employeeWallet: 'H4TXxwPqzSMgQLtMP7UiWr9yvZ4TNsY61bbCUjyeCQDr',
+  employeeId: 'a5ecda3a-be6b-49be-b4cb-b7141400a383',
+  streamId: '7832998c-5c55-496c-a39a-01247b310afe',
+  employeePda: '4SEFXhvjS7p1GdDXXtFFhTGhf7xD4mbN5Q3WMsYrwi5w',
+  privatePayrollPda: 'eyiycT65pqRznA7BHUdGCNR1cwHQY2ekbpgUBv55mmW',
+  permissionPda: '2DTin8X6TkJuufupizkn9D4saG4f3EWDV6t4YZgfB8ad',
+  crankTaskId: '7149527326268799031',
+  crankIntervalMs: 1000,
+  baselineLastAccrualTimestamp: '1776808638',
+  directCheckpointSignature: '5sW7jhAPd8QNMeQjjkcA7fQwS9emw1QM9D3HAf7gBDPF3UwT41MSyPcVBRhqWBQq64k7ei7AAV6GVg1cQNvxnVbF',
+  directCheckpointLastAccrualTimestamp: '1776808640',
+  autonomousLastAccrualTimestamp: '1776808644',
+  baselineAccruedUnpaidMicro: '60000',
+  directCheckpointAccruedUnpaidMicro: '100000',
+  autonomousAccruedUnpaidMicro: '180000',
+  stableAfterCancelLastAccrualTimestamp: '1776808645',
+  stableAfterCancelAccruedUnpaidMicro: '200000'
+}
+
+Autonomous checkpoint verification completed successfully.
