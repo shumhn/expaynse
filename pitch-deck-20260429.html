@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Expaynse - Private Real-Time Payroll on Solana</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0a0e27;
+      --bg-secondary: #111827;
+      --bg-card: #1f2937;
+      --text-primary: #ffffff;
+      --text-secondary: #9ca3af;
+      --accent-primary: #6366f1;
+      --accent-secondary: #8b5cf6;
+      --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+      --success: #10b981;
+      --warning: #f59e0b;
+      --error: #ef4444;
+      --border: #374151;
+      --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: var(--font-main);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+      overflow: hidden;
+    }
+
+    .deck-container {
+      width: 100vw;
+      height: 100vh;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .slide {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 4rem;
+      opacity: 0;
+      transform: translateX(100%);
+      transition: opacity 0.5s ease, transform 0.5s ease;
+      pointer-events: none;
+    }
+
+    .slide.active {
+      opacity: 1;
+      transform: translateX(0);
+      pointer-events: all;
+    }
+
+    .slide-content {
+      max-width: 1200px;
+      width: 100%;
+    }
+
+    h1 {
+      font-size: 4rem;
+      font-weight: 800;
+      line-height: 1.1;
+      margin-bottom: 1.5rem;
+      background: var(--accent-gradient);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    h2 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 1.5rem;
+      color: var(--text-primary);
+    }
+
+    h3 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: var(--text-primary);
+    }
+
+    p {
+      font-size: 1.25rem;
+      color: var(--text-secondary);
+      margin-bottom: 1.5rem;
+      max-width: 800px;
+    }
+
+    ul, ol {
+      font-size: 1.25rem;
+      color: var(--text-secondary);
+      margin-bottom: 1.5rem;
+      padding-left: 2rem;
+    }
+
+    li {
+      margin-bottom: 0.75rem;
+    }
+
+    .tagline {
+      font-size: 1.5rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 2rem;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1.5rem;
+      margin: 2rem 0;
+    }
+
+    .metric-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      text-align: center;
+    }
+
+    .metric-value {
+      font-size: 2.5rem;
+      font-weight: 700;
+      color: var(--accent-primary);
+      margin-bottom: 0.5rem;
+    }
+
+    .metric-label {
+      font-size: 1rem;
+      color: var(--text-secondary);
+    }
+
+    .comparison-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 2rem 0;
+    }
+
+    .comparison-table th,
+    .comparison-table td {
+      padding: 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .comparison-table th {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .comparison-table td {
+      color: var(--text-secondary);
+    }
+
+    .comparison-table .check {
+      color: var(--success);
+      font-weight: 700;
+    }
+
+    .comparison-table .cross {
+      color: var(--error);
+      font-weight: 700;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1.5rem;
+      margin: 2rem 0;
+    }
+
+    .feature-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+
+    .feature-card h3 {
+      color: var(--accent-primary);
+      margin-bottom: 0.75rem;
+    }
+
+    .feature-card p {
+      font-size: 1rem;
+      margin-bottom: 0;
+    }
+
+    .navigation {
+      position: fixed;
+      bottom: 2rem;
+      right: 2rem;
+      display: flex;
+      gap: 1rem;
+      z-index: 1000;
+    }
+
+    .nav-button {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 1rem;
+      font-weight: 500;
+      transition: all 0.2s ease;
+    }
+
+    .nav-button:hover {
+      background: var(--accent-primary);
+      border-color: var(--accent-primary);
+    }
+
+    .slide-counter {
+      position: fixed;
+      bottom: 2rem;
+      left: 2rem;
+      font-size: 1rem;
+      color: var(--text-secondary);
+      z-index: 1000;
+    }
+
+    .presenter-notes {
+      position: fixed;
+      bottom: 5rem;
+      left: 2rem;
+      right: 2rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+      display: none;
+      max-height: 200px;
+      overflow-y: auto;
+      z-index: 999;
+    }
+
+    .presenter-notes.visible {
+      display: block;
+    }
+
+    .presenter-notes h4 {
+      color: var(--accent-primary);
+      margin-bottom: 0.5rem;
+      font-size: 1rem;
+    }
+
+    @media print {
+      .navigation,
+      .slide-counter,
+      .presenter-notes {
+        display: none !important;
+      }
+
+      .slide {
+        position: relative;
+        opacity: 1;
+        transform: none;
+        page-break-after: always;
+      }
+    }
+
+    .highlight {
+      color: var(--accent-primary);
+      font-weight: 600;
+    }
+
+    .architecture-diagram {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+      margin: 2rem 0;
+      font-family: monospace;
+      font-size: 0.9rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="deck-container">
+    <!-- Slide 1: Title -->
+    <div class="slide active" data-slide="1">
+      <div class="slide-content">
+        <h1>Expaynse</h1>
+        <p class="tagline">Private, real-time payroll on Solana</p>
+        <p>Salary data in TEE enclaves. Earnings stream every second. No salary leaks.</p>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <div class="metric-value">PER</div>
+            <div class="metric-label">Private Rollups</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">TEE</div>
+            <div class="metric-label">Confidential State</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">Autonomous</div>
+            <div class="metric-label">Crank Accrual</div>
+          </div>
+        </div>
+      </div>
+      <div class="presenter-notes" data-notes="1">
+        <h4>Speaking Notes</h4>
+        Expaynse is a confidential payroll protocol on Solana using MagicBlock Private Ephemeral Rollups. Salary state lives in TEE enclaves, earnings stream every second via autonomous cranks, and private transfers break the employer-employee link. Fully on-chain — no off-chain servers.
+      </div>
+    </div>
+
+    <!-- Slide 2: Problem -->
+    <div class="slide" data-slide="2">
+      <div class="slide-content">
+        <h2>The Problem</h2>
+        <p>Public blockchain payroll destroys companies from the inside.</p>
+        <ul>
+          <li>Every salary is visible — employees discover compensation gaps, morale collapses</li>
+          <li>Competitors see your burn rate and poach talent by outbidding exact salaries</li>
+          <li>Every payout creates a permanent employer-to-employee link on-chain</li>
+          <li>Workers earn every second but get paid every 30 days</li>
+        </ul>
+        <p class="highlight">On a public blockchain, compensation becomes office gossip.</p>
+      </div>
+      <div class="presenter-notes" data-notes="2">
+        <h4>Speaking Notes</h4>
+        The core problem is that on public blockchains, every transaction is visible. When you pay someone, anyone can see who paid whom and how much. For payroll, this is catastrophic. Employees discover salary gaps and get resentful. Competitors reverse-engineer your org chart and poach talent. And the traditional 30-day pay cycle forces a liquidity gap on workers.
+      </div>
+    </div>
+
+    <!-- Slide 3: Solution -->
+    <div class="slide" data-slide="3">
+      <div class="slide-content">
+        <h2>The Solution</h2>
+        <p>Expaynse combines MagicBlock PER, TEE confidentiality, and autonomous crank accrual.</p>
+        <div class="feature-grid">
+          <div class="feature-card">
+            <h3>Private Rollups (PER)</h3>
+            <p>Salary state in MagicBlock TEE enclaves — opaque on public layer</p>
+          </div>
+          <div class="feature-card">
+            <h3>Autonomous Accrual</h3>
+            <p>MagicBlock crank advances payroll every second without manual ticks</p>
+          </div>
+          <div class="feature-card">
+            <h3>Private Transfers</h3>
+            <p>Withdrawals with delay/split obfuscation — breaks wallet traceability</p>
+          </div>
+          <div class="feature-card">
+            <h3>Payout Modes</h3>
+            <p>Employer sets allowed modes (base/ephemeral), employee chooses at claim</p>
+          </div>
+          <div class="feature-card">
+            <h3>Cashout Requests</h3>
+            <p>Employee-initiated payouts with employer approval workflow</p>
+          </div>
+          <div class="feature-card">
+            <h3>Keeper-Free</h3>
+            <p>Fully on-chain crank-based settlements — no off-chain servers</p>
+          </div>
+        </div>
+      </div>
+      <div class="presenter-notes" data-notes="3">
+        <h4>Speaking Notes</h4>
+        Expaynse uses MagicBlock Private Ephemeral Rollups to store salary state in TEE enclaves — opaque on the public layer. Autonomous cranks advance payroll every second without manual ticks. Private transfers use delay/split to break wallet traceability. Payout modes let employers control where funds go while employees choose within those bounds. Cashout requests enable employee-initiated payouts with employer approval. Fully on-chain with keeper-free design.
+      </div>
+    </div>
+
+    <!-- Slide 4: Market -->
+    <div class="slide" data-slide="4">
+      <div class="slide-content">
+        <h2>Market Opportunity</h2>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <div class="metric-value">$1.14B</div>
+            <div class="metric-label">Crypto Payroll Market (2024)</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">22.7%</div>
+            <div class="metric-label">CAGR to 2033</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">$8.41B</div>
+            <div class="metric-label">Projected Market (2033)</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">12,000+</div>
+            <div class="metric-label">DAOs Managing $28B</div>
+          </div>
+        </div>
+        <p>Cross-border payment flows: $39.9T (2024) → $64.5T by 2032. Crypto reduces fees by up to 95% vs SWIFT.</p>
+        <p class="highlight">Stablecoin payroll crossed the early-adopter chasm in 2025. Yet no protocol offers salary privacy — until Expaynse.</p>
+      </div>
+      <div class="presenter-notes" data-notes="4">
+        <h4>Speaking Notes</h4>
+        The crypto payroll market is $1.14B in 2024 and growing at 22.7% CAGR, projected to reach $8.41B by 2033. There are 12,000+ DAOs managing $28B on-chain who need private contributor payments. Cross-border payments are a $39.9T market growing to $64.5T by 2032, and crypto reduces fees by 95% vs SWIFT. The timing is right — stablecoin payroll is mainstream now, but privacy is missing.
+      </div>
+    </div>
+
+    <!-- Slide 5: Competition -->
+    <div class="slide" data-slide="5">
+      <div class="slide-content">
+        <h2>Competitive Landscape</h2>
+        <table class="comparison-table">
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th>Expaynse</th>
+              <th>Superfluid</th>
+              <th>Sablier</th>
+              <th>Zebec</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Private State (PER/TEE)</td>
+              <td class="check">✓</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+            </tr>
+            <tr>
+              <td>Autonomous Accrual</td>
+              <td class="check">✓</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+            </tr>
+            <tr>
+              <td>Private Transfers</td>
+              <td class="check">✓</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+            </tr>
+            <tr>
+              <td>Payout Mode Control</td>
+              <td class="check">✓</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+            </tr>
+            <tr>
+              <td>Cashout Requests</td>
+              <td class="check">✓</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+              <td class="cross">✗</td>
+            </tr>
+            <tr>
+              <td>Keeper-Free</td>
+              <td class="check">✓</td>
+              <td class="cross">Partial</td>
+              <td class="check">✓</td>
+              <td class="cross">✗</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="highlight">Expaynse is the only protocol with TEE-based private state, autonomous crank accrual, and private transfer obfuscation.</p>
+      </div>
+      <div class="presenter-notes" data-notes="5">
+        <h4>Speaking Notes</h4>
+        Superfluid and Sablier have great streaming primitives but all salary data is fully public on-chain. Zebec focuses on TradFi integration with transparent salaries. Expaynse is the privacy-first payroll protocol using TEE enclaves for confidential state, autonomous cranks for continuous accrual, and private transfers with delay/split to break traceability. Nobody else does this.
+      </div>
+    </div>
+
+    <!-- Slide 6: Architecture -->
+    <div class="slide" data-slide="6">
+      <div class="slide-content">
+        <h2>Architecture</h2>
+        <p>Expaynse uses MagicBlock PER as the confidential execution layer with autonomous crank accrual.</p>
+        <div class="feature-grid">
+          <div class="feature-card">
+            <h3>Solana Base Layer</h3>
+            <p>High-throughput L1 with sub-second finality and ~$0.001 tx costs</p>
+          </div>
+          <div class="feature-card">
+            <h3>MagicBlock TEE</h3>
+            <p>Private Ephemeral Rollups for confidential payroll state storage</p>
+          </div>
+          <div class="feature-card">
+            <h3>Autonomous Crank</h3>
+            <p>Scheduled checkpoint accrual without manual ticks</p>
+          </div>
+          <div class="feature-card">
+            <h3>Private Transfer Builder</h3>
+            <p>Delay/split obfuscation via MagicBlock Payments API</p>
+          </div>
+          <div class="feature-card">
+            <h3>MongoDB</h3>
+            <p>Metadata, history, and compliance event logging</p>
+          </div>
+          <div class="feature-card">
+            <h3>JWT Auth</h3>
+            <p>TEE auth tokens with expiry checking for secure state access</p>
+          </div>
+        </div>
+      </div>
+      <div class="presenter-notes" data-notes="6">
+        <h4>Speaking Notes</h4>
+        Solana provides the base layer with sub-second finality and near-zero transaction costs. MagicBlock TEE stores private payroll state in Ephemeral Rollups. Autonomous cranks schedule checkpoint accrual without manual ticks. Private transfers use delay/split via MagicBlock Payments API to break traceability. MongoDB stores metadata, history, and compliance events. JWT auth tokens with expiry checking secure TEE state access. Fully on-chain with keeper-free design.
+      </div>
+    </div>
+
+    <!-- Slide 7: How It Works -->
+    <div class="slide" data-slide="7">
+      <div class="slide-content">
+        <h2>How It Works</h2>
+        <div class="feature-grid">
+          <div class="feature-card">
+            <h3>For Employers</h3>
+            <p>Connect wallet → Create employee → Create stream with rate → Onboard to PER (4 transactions) → Schedule checkpoint crank → Salary accrues autonomously.</p>
+          </div>
+          <div class="feature-card">
+            <h3>For Employees</h3>
+            <p>Connect wallet → Initialize private account (one-time) → View live accrual from TEE → Request cashout → Claim payout via private transfer.</p>
+          </div>
+          <div class="feature-card">
+            <h3>Autonomous Streaming</h3>
+            <p>Employer schedules checkpoint crank → MagicBlock TEE advances payroll state every second → Employer triggers settlement → Private transfer with delay/split obfuscation.</p>
+          </div>
+        </div>
+      </div>
+      <div class="presenter-notes" data-notes="7">
+        <h4>Speaking Notes</h4>
+        For employers: connect wallet, create employee record, create stream with rate per second, onboard to PER via 4 transactions (createEmployee, createPermission, delegate, initializePrivatePayroll), then schedule checkpoint crank. Salary accrues autonomously without manual ticks. For employees: connect wallet, initialize private account once, view live accrual from TEE, request cashout, claim via private transfer. The autonomous streaming flow uses MagicBlock crank for continuous accrual, employer triggers settlement, and private transfers with delay/split break traceability.
+      </div>
+    </div>
+
+    <!-- Slide 8: Business Model -->
+    <div class="slide" data-slide="8">
+      <div class="slide-content">
+        <h2>Business Model</h2>
+        <div class="feature-grid">
+          <div class="feature-card">
+            <h3>Protocol Fee</h3>
+            <p>0.1–0.5% fee on every withdrawal/payout processed (from mainnet launch)</p>
+          </div>
+          <div class="feature-card">
+            <h3>Premium Tier</h3>
+            <p>Monthly subscription for advanced features: batch operations, compliance exports, multi-signer vaults, priority settlement (post-mainnet)</p>
+          </div>
+          <div class="feature-card">
+            <h3>Vault Yield</h3>
+            <p>Idle funds generate yield via DeFi integrations — protocol keeps a performance fee (post-mainnet)</p>
+          </div>
+          <div class="feature-card">
+            <h3>SDK Licensing</h3>
+            <p>White-label Expaynse for freelancer platforms, HR tools, and payroll providers — per-seat or revenue-share model (Phase 2–3)</p>
+          </div>
+        </div>
+        <p class="highlight">Cost to serve: near-zero marginal cost. Revenue scales with volume. Privacy creates lock-in.</p>
+      </div>
+      <div class="presenter-notes" data-notes="8">
+        <h4>Speaking Notes</h4>
+        The business model has four revenue streams. Protocol fees of 0.1–0.5% on withdrawals scale with volume. Premium tiers for advanced features provide recurring revenue. Vault yield from idle funds captures additional value. SDK licensing enables B2B partnerships. The marginal cost is near-zero since all logic is on-chain. Privacy creates high switching costs — once salary state is in TEE, migration is difficult.
+      </div>
+    </div>
+
+    <!-- Slide 9: Roadmap -->
+    <div class="slide" data-slide="9">
+      <div class="slide-content">
+        <h2>Roadmap</h2>
+        <ul>
+          <li><span class="highlight">✅ Devnet live</span> — PER streaming, autonomous crank, private transfers, payout modes fully functional</li>
+          <li><span class="highlight">✅ Keeper-free architecture</span> — Crank-based settlements, no off-chain servers</li>
+          <li><span class="highlight">🔜 Mainnet beta</span> — Production deployment on Solana mainnet</li>
+          <li><span class="highlight">🔜 Multi-business batch ops</span> — Bulk employee onboarding, batch deposits</li>
+          <li><span class="highlight">🔜 Payslip NFTs</span> — On-chain verifiable proof of payment for employees</li>
+          <li><span class="highlight">🔜 Compliance exports</span> — Tax-ready reports, jurisdiction-aware summaries</li>
+          <li><span class="highlight">🔜 SDK & API</span> — Third-party integrations for platforms and payroll providers</li>
+          <li><span class="highlight">🔜 Mobile experience</span> — Employee app for real-time balance tracking and withdrawals</li>
+        </ul>
+      </div>
+      <div class="presenter-notes" data-notes="9">
+        <h4>Speaking Notes</h4>
+        We're currently on devnet with all features fully functional. Keeper-free architecture is complete with crank-based settlements. Next is mainnet beta. Then we're adding batch operations for multi-business use, payslip NFTs for verifiable payment proof, compliance exports for tax reporting, SDK and API for third-party integrations, and a mobile experience for employees.
+      </div>
+    </div>
+
+    <!-- Slide 10: Why Solana -->
+    <div class="slide" data-slide="10">
+      <div class="slide-content">
+        <h2>Why Solana</h2>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <div class="metric-value">$35B</div>
+            <div class="metric-label">Ecosystem TVL (2025)</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">$0.001</div>
+            <div class="metric-label">Transaction Cost</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">&lt;1s</div>
+            <div class="metric-label">Finality Time</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">65,000+</div>
+            <div class="metric-label">TPS</div>
+          </div>
+        </div>
+        <p>Solana's sub-second finality and near-zero transaction costs make per-second salary streaming economically viable. The ecosystem has grown from $3B to $35B TVL in 2025, with strong developer momentum and MagicBlock's TEE infrastructure natively available.</p>
+      </div>
+      <div class="presenter-notes" data-notes="10">
+        <h4>Speaking Notes</h4>
+        Solana is the only chain where per-second salary streaming makes economic sense. Transaction costs are $0.001 and finality is under 1 second. The ecosystem has grown dramatically from $3B to $35B TVL in 2025. MagicBlock's TEE infrastructure is natively available on Solana, which is critical for our real-time streaming architecture. The developer ecosystem is strong and growing.
+      </div>
+    </div>
+
+    <!-- Slide 11: Demo -->
+    <div class="slide" data-slide="11">
+      <div class="slide-content">
+        <h2>Demo</h2>
+        <p>Expaynse is live on Solana Devnet. All features are fully functional:</p>
+        <ul>
+          <li>Private payroll state in MagicBlock TEE enclaves</li>
+          <li>Autonomous checkpoint crank accrual</li>
+          <li>Private transfers with delay/split obfuscation</li>
+          <li>Payout modes (base/ephemeral) with employer control</li>
+          <li>Cashout requests with employer approval workflow</li>
+          <li>Keeper-free crank-based settlements</li>
+        </ul>
+        <p class="highlight">Try it at: expaynse-seven.vercel.app</p>
+      </div>
+      <div class="presenter-notes" data-notes="11">
+        <h4>Speaking Notes</h4>
+        This isn't a concept — it's live on devnet right now. You can connect a wallet, create employee records, create streams with rate per second, onboard to PER via 4 transactions, schedule checkpoint crank, and watch earnings accrue autonomously. Employees can initialize their private account, view live accrual from TEE, request cashouts, and claim via private transfers with delay/split obfuscation. Everything works end-to-end.
+      </div>
+    </div>
+
+    <!-- Slide 12: Ask -->
+    <div class="slide" data-slide="12">
+      <div class="slide-content">
+        <h2>The Ask</h2>
+        <p>We're seeking support to bring private payroll to Solana mainnet.</p>
+        <div class="feature-grid">
+          <div class="feature-card">
+            <h3>Funding</h3>
+            <p>TBD — Grant or investment to fund mainnet deployment and team expansion</p>
+          </div>
+          <div class="feature-card">
+            <h3>Partnerships</h3>
+            <p>Integrations with DAO tooling, HR platforms, and stablecoin on-ramps</p>
+          </div>
+          <div class="feature-card">
+            <h3>Ecosystem</h3>
+            <p>Support for developer content, hackathon sponsorship, and community building</p>
+          </div>
+        </div>
+        <p class="highlight">Privacy is the missing piece in crypto payroll. Expaynse completes the puzzle.</p>
+      </div>
+      <div class="presenter-notes" data-notes="12">
+        <h4>Speaking Notes</h4>
+        We're seeking support to bring Expaynse to mainnet. This includes funding for deployment and team expansion, partnerships with DAO tooling and HR platforms, and ecosystem support for developer content and community building. Privacy is the missing piece in crypto payroll — streaming payments exist, but they're all fully public. Expaynse completes the puzzle by adding TEE-based confidentiality to real-time streaming.
+      </div>
+    </div>
+
+    <!-- Slide 13: Contact -->
+    <div class="slide" data-slide="13">
+      <div class="slide-content">
+        <h2>Let's Talk</h2>
+        <div class="feature-grid">
+          <div class="feature-card">
+            <h3>GitHub</h3>
+            <p>github.com/shumhn/Expaynse</p>
+          </div>
+          <div class="feature-card">
+            <h3>Website</h3>
+            <p>expaynse-seven.vercel.app</p>
+          </div>
+          <div class="feature-card">
+            <h3>Twitter</h3>
+            <p>@expaynse_sol</p>
+          </div>
+        </div>
+        <p class="highlight">Private payroll via TEE. Autonomous crank accrual. No salary leaks.</p>
+      </div>
+      <div class="presenter-notes" data-notes="13">
+        <h4>Speaking Notes</h4>
+        Check out the GitHub repo to see the code. Visit the website to try the devnet demo. Follow us on Twitter for updates. We're building the missing piece in crypto payroll — TEE-based confidentiality with autonomous crank accrual. Let's talk about bringing confidential payroll to Solana mainnet.
+      </div>
+    </div>
+  </div>
+
+  <div class="navigation">
+    <button class="nav-button" onclick="previousSlide()">← Previous</button>
+    <button class="nav-button" onclick="nextSlide()">Next →</button>
+  </div>
+
+  <div class="slide-counter">
+    Slide <span id="current-slide">1</span> of <span id="total-slides">13</span>
+  </div>
+
+  <div class="presenter-notes" id="presenter-notes">
+    <h4>Speaking Notes</h4>
+    <span id="notes-content"></span>
+  </div>
+
+  <script>
+    let currentSlide = 1;
+    const totalSlides = 13;
+
+    function showSlide(n) {
+      const slides = document.querySelectorAll('.slide');
+      slides.forEach(slide => slide.classList.remove('active'));
+      
+      currentSlide = n;
+      if (currentSlide > totalSlides) currentSlide = 1;
+      if (currentSlide < 1) currentSlide = totalSlides;
+      
+      slides[currentSlide - 1].classList.add('active');
+      document.getElementById('current-slide').textContent = currentSlide;
+      
+      const notes = slides[currentSlide - 1].getAttribute('data-notes');
+      const notesElement = document.getElementById('presenter-notes');
+      const notesContent = document.getElementById('notes-content');
+      
+      if (notes) {
+        notesContent.textContent = notes;
+        notesElement.classList.add('visible');
+      } else {
+        notesElement.classList.remove('visible');
+      }
+    }
+
+    function nextSlide() {
+      showSlide(currentSlide + 1);
+    }
+
+    function previousSlide() {
+      showSlide(currentSlide - 1);
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ') {
+        nextSlide();
+      } else if (e.key === 'ArrowLeft') {
+        previousSlide();
+      } else if (e.key === 'n' || e.key === 'N') {
+        const notesElement = document.getElementById('presenter-notes');
+        notesElement.classList.toggle('visible');
+      }
+    });
+
+    document.getElementById('total-slides').textContent = totalSlides;
+    showSlide(1);
+  </script>
+</body>
+</html>
