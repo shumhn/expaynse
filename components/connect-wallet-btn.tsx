@@ -227,7 +227,7 @@ export function ConnectWalletBtn({
           <button
             onClick={openModal}
             aria-label="Connect wallet"
-            className={`${isStandalone ? "inline-flex" : "hidden md:flex"} items-center gap-2.5 px-6 py-2.5 rounded-full bg-[#1eba98] hover:bg-[#1eba98]/80 active:scale-[0.98] text-black text-[13.5px] font-bold tracking-tight transition-all duration-200 cursor-pointer shadow-sm`}
+            className={`${isStandalone ? "inline-flex w-full justify-center py-3 rounded-xl" : "hidden md:flex px-6 py-2.5 rounded-full"} items-center gap-2.5 bg-[#1eba98] hover:bg-[#1eba98]/80 active:scale-[0.98] text-black text-[13.5px] font-bold tracking-tight transition-all duration-200 cursor-pointer shadow-sm`}
           >
             <Wallet size={16} />
             Connect Wallet

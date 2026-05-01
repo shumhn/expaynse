@@ -84,13 +84,17 @@ export default function ClaimWithdrawPage() {
 
   const privBalanceNum = parseFloat(privBalance ?? "0");
   const primaryPayrollStream = payrollSummary?.streams?.[0];
+  const hasLivePreview = Boolean(
+    primaryPayrollStream?.preview && primaryPayrollStream?.liveState?.ready,
+  );
   const liveClaimableMicros =
-    Number(primaryPayrollStream?.preview?.effectiveClaimableAmountMicro ?? 0) ||
-    Number(primaryPayrollStream?.preview?.claimableAmountMicro ?? 0) ||
-    0;
+    hasLivePreview
+      ? Number(primaryPayrollStream?.preview?.effectiveClaimableAmountMicro ?? 0) ||
+        Number(primaryPayrollStream?.preview?.claimableAmountMicro ?? 0) ||
+        0
+      : 0;
   const liveClaimableUsdc = liveClaimableMicros / 1_000_000;
-  const requestMaxUsdc =
-    liveClaimableUsdc > 0 ? liveClaimableUsdc : privBalanceNum;
+  const requestMaxUsdc = liveClaimableUsdc > 0 ? liveClaimableUsdc : 0;
 
   const pendingRequest = cashoutRequests.find((r) => r.status === "pending");
   const hasPendingRequest = !!pendingRequest;
@@ -293,6 +297,12 @@ export default function ClaimWithdrawPage() {
     const amount = Number.parseFloat(requestAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
       toast.error("Enter a valid request amount");
+      return;
+    }
+    if (!hasLivePreview) {
+      toast.error(
+        "Live PER preview is required before sending a payout request. Refresh and sign first.",
+      );
       return;
     }
     if (requestMaxUsdc > 0 && amount > requestMaxUsdc) {
@@ -591,11 +601,16 @@ export default function ClaimWithdrawPage() {
                   className="sm:col-span-2 min-h-[90px] rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white outline-none placeholder:text-[#62626b]"
                 />
               </div>
+              {!hasLivePreview ? (
+                <p className="mt-3 text-[11px] text-amber-300">
+                  PER preview is not available yet, so request amount is locked until live claimable sync succeeds.
+                </p>
+              ) : null}
               <div className="mt-2 flex items-center justify-between px-1">
                 <p className="text-[10px] text-[#8f8f95]">
                   Live claimable now:{" "}
                   <span className="font-bold text-[#64f0ce]">
-                    {liveClaimableUsdc.toFixed(6)} USDC
+                    {hasLivePreview ? `${liveClaimableUsdc.toFixed(6)} USDC` : "—"}
                   </span>
                 </p>
                 <button
@@ -614,6 +629,8 @@ export default function ClaimWithdrawPage() {
                   submittingRequest ||
                   !publicKey ||
                   !primaryPayrollStream?.stream?.id ||
+                  !hasLivePreview ||
+                  requestMaxUsdc <= 0 ||
                   hasPendingRequest
                 }
                 className="mt-4 inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-[#1eba98] px-5 text-[10px] font-bold uppercase tracking-wider text-black transition-all hover:bg-[#18a786] disabled:opacity-40"

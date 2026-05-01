@@ -75,10 +75,10 @@ export default function ClaimBalancesPage() {
   const effectiveRatePerSecond =
     Number.isFinite(previewRatePerSecond) && previewRatePerSecond > 0
       ? previewRatePerSecond
-      : (primaryPayrollStream?.stream.ratePerSecond ?? 0);
+      : 0;
   const animatedPrimaryClaimableAmountMicro = computeAnimatedClaimableAmountMicro({
     preview: primaryPayrollStream?.preview,
-    liveState: primaryPayrollStream?.liveState ?? { ready: false, source: "stream-metadata", reason: "preview-unavailable" },
+    liveState: primaryPayrollStream?.liveState ?? { ready: false, source: "per-preview", reason: "preview-unavailable" },
     syncedAt: payrollSummary?.syncedAt,
     nowMs: animatedNowMs,
   });
@@ -191,16 +191,18 @@ export default function ClaimBalancesPage() {
                   <span className="text-6xl font-bold tracking-tighter text-white">
                     {hasLivePreview && animatedPrimaryClaimableAmountMicro !== null
                       ? formatMicroUsdc(animatedPrimaryClaimableAmountMicro, 6)
-                      : "0.00"}
+                      : "—"}
                   </span>
                   <span className="text-xl font-bold tracking-tight text-[#62626b]">USDC</span>
                 </div>
                 <p className="mt-2 text-xs text-[#a8a8aa]">Accrued from your active payroll stream.</p>
-                <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
-                  <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#a8a8aa]">
-                    Payroll Source: {hasLivePreview ? "Live PER" : "Stream Metadata"}
-                  </span>
-                </div>
+                {hasLivePreview ? (
+                  <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-[#1eba98]/30 bg-[#1eba98]/10 px-3 py-1.5">
+                    <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">
+                      Payroll Source: Live PER
+                    </span>
+                  </div>
+                ) : null}
               </div>
 
               {!registeredEmployeeWallet ? (
@@ -258,12 +260,12 @@ export default function ClaimBalancesPage() {
                     ? formatPayrollRate(effectiveRatePerSecond)
                     : "0 USDC/sec"}
                 </p>
-                <p className="mt-1 text-[10px] font-bold text-[#62626b]">{hasLivePreview ? "TEE RATE" : "CONFIG RATE"}</p>
+                <p className="mt-1 text-[10px] font-bold text-[#62626b]">{hasLivePreview ? "TEE RATE" : "PER PREVIEW REQUIRED"}</p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-[#0b0b0d] p-6">
                 <p className="mb-2 text-[9px] font-bold uppercase tracking-widest text-[#8f8f95]">Last Sync</p>
                 <p className="mt-1 text-sm font-bold text-white">
-                  {hasLivePreview && primaryPayrollStream?.preview ? formatLastPrivateUpdate(primaryPayrollStream.preview.lastAccrualTimestamp) : "Awaiting Signed Sync"}
+                  {hasLivePreview && primaryPayrollStream?.preview ? formatLastPrivateUpdate(primaryPayrollStream.preview.lastAccrualTimestamp) : "PER preview unavailable"}
                 </p>
                 <p className="mt-1 text-[10px] font-bold text-[#62626b]">UTC</p>
               </div>

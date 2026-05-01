@@ -121,12 +121,25 @@ export interface CashoutRequestRecord {
   updatedAt: string;
 }
 
+export interface AuditorTokenRecord {
+  id: string;
+  token: string;
+  employerWallet: string;
+  label?: string;
+  expiresAt: string;
+  revoked: boolean;
+  revokedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PayrollStoreData {
   employers: EmployerRecord[];
   employees: EmployeeRecord[];
   streams: PayrollStreamRecord[];
   transfers: PayrollTransferRecord[];
   cashoutRequests: CashoutRequestRecord[];
+  auditorTokens: AuditorTokenRecord[];
 }
 
 export interface CreateEmployeeInput {
@@ -189,6 +202,7 @@ type EmployeeDoc = EmployeeRecord;
 type StreamDoc = PayrollStreamRecord;
 type TransferDoc = PayrollTransferRecord;
 type CashoutRequestDoc = CashoutRequestRecord;
+type AuditorTokenDoc = AuditorTokenRecord;
 
 export interface UpdateStreamRuntimeStateInput {
   employerWallet: string;
@@ -320,6 +334,10 @@ async function cashoutRequestsCollection(): Promise<
   return (await getDb()).collection<CashoutRequestDoc>("cashout_requests");
 }
 
+async function auditorTokensCollection(): Promise<Collection<AuditorTokenDoc>> {
+  return (await getDb()).collection<AuditorTokenDoc>("auditor_tokens");
+}
+
 async function touchEmployer(employerWallet: string) {
   const wallet = assertWallet(employerWallet, "Employer wallet");
   const timestamp = nowIso();
@@ -350,13 +368,17 @@ async function touchEmployer(employerWallet: string) {
 }
 
 export async function getPayrollStore(): Promise<PayrollStoreData> {
-  const [employers, employees, streams, transfers, cashoutRequests] =
+  const [employers, employees, streams, transfers, cashoutRequests, auditorTokens] =
     await Promise.all([
       (await employersCollection()).find({}).sort({ createdAt: 1 }).toArray(),
       (await employeesCollection()).find({}).sort({ createdAt: 1 }).toArray(),
       (await streamsCollection()).find({}).sort({ createdAt: 1 }).toArray(),
       (await transfersCollection()).find({}).sort({ createdAt: 1 }).toArray(),
       (await cashoutRequestsCollection())
+        .find({})
+        .sort({ createdAt: 1 })
+        .toArray(),
+      (await auditorTokensCollection())
         .find({})
         .sort({ createdAt: 1 })
         .toArray(),
@@ -368,6 +390,7 @@ export async function getPayrollStore(): Promise<PayrollStoreData> {
     streams: streams.map(({ ...doc }) => doc),
     transfers: transfers.map(({ ...doc }) => doc),
     cashoutRequests: cashoutRequests.map(({ ...doc }) => doc),
+    auditorTokens: auditorTokens.map(({ ...doc }) => doc),
   };
 }
 
@@ -696,6 +719,7 @@ export async function updateStreamStatus(input: UpdateStreamStatusInput) {
   };
 }
 
+// ── Auditor Token Functions ────────────────────────────────
 export async function updateStreamConfig(input: UpdateStreamConfigInput) {
   const employerWallet = assertWallet(input.employerWallet, "Employer wallet");
   const collection = await streamsCollection();
@@ -1190,4 +1214,94 @@ export async function fulfillPendingCashoutRequestsForStream(input: {
       updatedAt: timestamp,
     },
   });
+}
+
+// ── Auditor Token Functions ────────────────────────────────
+
+function generateSecureToken(): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let token = "exp_";
+  for (let i = 0; i < 32; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return token;
+}
+
+export async function createAuditorToken(input: {
+  employerWallet: string;
+  label?: string;
+  expiresDays?: number;
+}) {
+  const employerWallet = assertWallet(input.employerWallet, "Employer wallet");
+  const timestamp = nowIso();
+  const expiresAt = new Date(
+    Date.now() + (input.expiresDays ?? 30) * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const token = generateSecureToken();
+
+  const collection = await auditorTokensCollection();
+  const doc: AuditorTokenDoc = {
+    id: randomUUID(),
+    token,
+    employerWallet,
+    label: input.label?.trim() || undefined,
+    expiresAt,
+    revoked: false,
+    revokedAt: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  await collection.insertOne(doc);
+  return doc;
+}
+
+export async function listAuditorTokens(employerWallet: string) {
+  const wallet = assertWallet(employerWallet, "Employer wallet");
+  const collection = await auditorTokensCollection();
+  return collection
+    .find({ employerWallet: wallet })
+    .sort({ createdAt: -1 })
+    .toArray();
+}
+
+export async function validateAuditorToken(token: string) {
+  const collection = await auditorTokensCollection();
+  const doc = await collection.findOne({ token: token.trim(), revoked: false });
+
+  if (!doc) {
+    throw new Error("Invalid or revoked auditor token");
+  }
+
+  if (new Date(doc.expiresAt) < new Date()) {
+    throw new Error("Auditor token has expired");
+  }
+
+  return doc;
+}
+
+export async function revokeAuditorToken(
+  token: string,
+  employerWallet: string,
+) {
+  const wallet = assertWallet(employerWallet, "Employer wallet");
+  const collection = await auditorTokensCollection();
+  const timestamp = nowIso();
+
+  const result = await collection.updateOne(
+    { token: token.trim(), employerWallet: wallet, revoked: false },
+    {
+      $set: {
+        revoked: true,
+        revokedAt: timestamp,
+        updatedAt: timestamp,
+      },
+    },
+  );
+
+  if (result.matchedCount === 0) {
+    throw new Error("Token not found or already revoked");
+  }
+
+  return true;
 }

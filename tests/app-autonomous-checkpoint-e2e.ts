@@ -94,9 +94,7 @@ type OnboardBuildResponse = {
   permissionPda: string;
   alreadyOnboarded?: boolean;
   transactions: {
-    createEmployee?: SendSpec;
-    createPermission?: SendSpec;
-    delegateBundle?: SendSpec;
+    baseSetup?: SendSpec;
     initializePrivatePayroll?: SendSpec;
   };
 };
@@ -1084,8 +1082,8 @@ async function main() {
       onboardJson.error || "Missing createPermission onboarding tx",
     );
     assert(
-      onboardJson.transactions?.delegateBundle,
-      onboardJson.error || "Missing delegateBundle onboarding tx",
+      onboardJson.transactions?.baseSetup,
+      onboardJson.error || "Missing baseSetup onboarding tx",
     );
     assert(
       onboardJson.transactions?.initializePrivatePayroll,
@@ -1102,30 +1100,12 @@ async function main() {
 
   logSection("Sign and send onboarding transactions");
 
-  let createEmployeeSignature: string | undefined;
-  if (onboardJson.transactions.createEmployee) {
-    createEmployeeSignature = await sendBuiltTransaction({
-      spec: onboardJson.transactions.createEmployee,
+  let baseSetupSignature: string | undefined;
+  if (onboardJson.transactions.baseSetup) {
+    baseSetupSignature = await sendBuiltTransaction({
+      spec: onboardJson.transactions.baseSetup,
       signer: employer,
-      signerLabel: "onboard:createEmployee",
-    });
-  }
-
-  let createPermissionSignature: string | undefined;
-  if (onboardJson.transactions.createPermission) {
-    createPermissionSignature = await sendBuiltTransaction({
-      spec: onboardJson.transactions.createPermission,
-      signer: employer,
-      signerLabel: "onboard:createPermission",
-    });
-  }
-
-  let delegateBundleSignature: string | undefined;
-  if (onboardJson.transactions.delegateBundle) {
-    delegateBundleSignature = await sendBuiltTransaction({
-      spec: onboardJson.transactions.delegateBundle,
-      signer: employer,
-      signerLabel: "onboard:delegateBundle",
+      signerLabel: "onboard:baseSetup",
     });
 
     console.log("Waiting for delegation to settle...");
@@ -1146,9 +1126,7 @@ async function main() {
   }
 
   console.log("Onboarding signatures:", {
-    createEmployeeSignature,
-    createPermissionSignature,
-    delegateBundleSignature,
+    baseSetupSignature,
     initializePrivatePayrollSignature,
   });
 

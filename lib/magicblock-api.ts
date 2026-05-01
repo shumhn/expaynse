@@ -1,6 +1,7 @@
 import {
   Connection,
   PublicKey,
+  SendTransactionError,
   Transaction,
   VersionedTransaction,
   clusterApiUrl,
@@ -211,6 +212,26 @@ function isWalletUserRejected(error: unknown) {
   );
 }
 
+async function enrichSendError(
+  conn: Connection,
+  error: unknown,
+): Promise<unknown> {
+  if (!(error instanceof SendTransactionError)) {
+    return error;
+  }
+
+  try {
+    const logs = await error.getLogs(conn);
+    if (!logs || logs.length === 0) {
+      return error;
+    }
+    const joined = logs.slice(-6).join(" | ");
+    return new Error(`${error.message}. Program logs: ${joined}`);
+  } catch {
+    return error;
+  }
+}
+
 async function refreshRecentBlockhash(
   conn: Connection,
   tx: Transaction | VersionedTransaction
@@ -374,7 +395,7 @@ export async function signAndSend(
         const shouldRetry =
           attempt < maxAttempts && isWritableAccountVerificationError(sendErr);
         if (!shouldRetry) {
-          throw sendErr;
+          throw await enrichSendError(conn, sendErr);
         }
 
         await sleep(retryDelayMs);
@@ -417,7 +438,7 @@ export async function signAndSend(
       }
     }
 
-    throw error;
+    throw await enrichSendError(conn, error);
   }
 }
 

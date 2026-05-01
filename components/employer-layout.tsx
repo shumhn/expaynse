@@ -11,7 +11,7 @@ export function EmployerLayout({ children }: { children: ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
-    <div className="min-h-screen bg-black flex">
+    <div className="h-screen bg-black flex overflow-hidden">
       {/* Mobile overlay */}
       {mobileOpen && (
         <div
@@ -23,16 +23,16 @@ export function EmployerLayout({ children }: { children: ReactNode }) {
       <AppSidebar mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
 
       {/* Main */}
-      <div className="flex-1 min-w-0 flex flex-col">
+      <div className="flex-1 min-w-0 flex flex-col h-screen">
         {/* Top bar */}
-        <header className="h-16 bg-[#0a0a0a] border-b border-white/5 flex items-center justify-between px-4 sm:px-6 sticky top-0 z-30">
+        <header className="h-16 bg-[#0a0a0a] border-b border-white/5 flex items-center justify-between px-4 sm:px-6 shrink-0 z-30">
           <button
             onClick={() => setMobileOpen(true)}
             className="lg:hidden p-2 -ml-2 rounded-lg hover:bg-white/5 transition-colors"
           >
             <ChevronLeft size={20} className="text-[#a8a8aa]" />
           </button>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 ml-auto">
             <ConnectWalletBtn menuOpen={false} onMenuToggle={() => {}} />
           </div>
         </header>

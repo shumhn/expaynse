@@ -11,13 +11,18 @@ import {
   DollarSign,
   CalendarDays,
   AlertTriangle,
+  Download,
+  Plus,
 } from "lucide-react";
+
+import Link from "next/link";
 
 import { toast } from "sonner";
 import { EmployerLayout } from "@/components/employer-layout";
 import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
 import { RunwayProjectionChart } from "@/components/ui/payroll-chart";
 import { CompensationBreakdownChart } from "@/components/ui/crypto-distribution-chart";
+import { DepositModal } from "@/components/deposit-modal";
 import {
   fetchTeeAuthToken,
   getBalance,
@@ -145,6 +150,8 @@ export default function DashboardPage() {
   }>>([]);
   const [loading, setLoading] = useState(false);
   const [vaultBalance, setVaultBalance] = useState<number>(0);
+  const [baseBalance, setBaseBalance] = useState<number>(0);
+  const [depositOpen, setDepositOpen] = useState(false);
 
   const tokenCache = useRef<string | null>(null);
 
@@ -176,17 +183,22 @@ export default function DashboardPage() {
 
   const refreshVaultBalance = useCallback(async () => {
     if (!walletAddr) return;
-    // Fetch private (vault) balance
     try {
       const teeToken = await getOrFetchToken();
-      const balRes = (await getPrivateBalance(
-        walletAddr,
-        teeToken,
-      )) as BalanceResponse;
-      const rawMicro = parseInt(balRes.balance ?? "0", 10);
-      setVaultBalance(rawMicro / 1_000_000);
+      
+      const [privBalRes, baseBalRes] = await Promise.all([
+        getPrivateBalance(walletAddr, teeToken).catch(() => null),
+        getBalance(walletAddr).catch(() => null)
+      ]);
+
+      if (privBalRes) {
+        setVaultBalance(parseInt(privBalRes.balance ?? "0", 10) / 1_000_000);
+      }
+      if (baseBalRes) {
+        setBaseBalance(parseInt(baseBalRes.balance ?? "0", 10) / 1_000_000);
+      }
     } catch {
-      // Private balance fetch failed silently
+      // Balance fetch failed silently
     }
   }, [walletAddr, getOrFetchToken]);
 
@@ -347,21 +359,40 @@ export default function DashboardPage() {
   return (
     <EmployerLayout>
       <div className="mx-auto max-w-6xl space-y-6">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-white">Employer Dashboard</h1>
-            <p className="text-sm text-[#a8a8aa]">
+            <p className="text-sm text-[#a8a8aa] mt-1">
               Real-time on-chain metrics, treasury health, and active stream analytics.
             </p>
           </div>
-          <button
-            onClick={() => void loadDashboard()}
-            disabled={loading || !connected}
-            className="inline-flex items-center gap-2 rounded-xl bg-[#1eba98] px-4 py-2.5 text-sm font-semibold text-black transition-colors hover:bg-[#1eba98]/80 disabled:opacity-40"
-          >
-            {loading ? <RefreshCw size={15} className="animate-spin" /> : <RefreshCw size={15} />}
-            Refresh
-          </button>
+          
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => void loadDashboard()}
+              disabled={loading || !connected}
+              className="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-[#0a0a0a] p-3 text-white transition-colors hover:bg-white/5 disabled:opacity-40 shadow-sm h-[44px] w-[44px]"
+              title="Refresh Dashboard"
+            >
+              {loading ? <RefreshCw size={18} className="animate-spin text-[#a8a8aa]" /> : <RefreshCw size={18} className="text-[#a8a8aa]" />}
+            </button>
+            
+            <button
+              onClick={() => setDepositOpen(true)}
+              className="inline-flex h-[44px] items-center gap-2 rounded-2xl border border-white/10 bg-[#0a0a0a] px-5 text-sm font-semibold text-white transition-colors hover:bg-white/5 shadow-sm"
+            >
+              <Download size={16} className="text-[#a8a8aa]" />
+              Deposit
+            </button>
+            
+            <Link
+              href="/disburse"
+              className="inline-flex h-[44px] items-center gap-2 rounded-2xl bg-[#1eba98] px-5 text-sm font-semibold text-black transition-colors hover:bg-[#1eba98]/80 shadow-[0_0_20px_rgba(30,186,152,0.3)]"
+            >
+              <Plus size={16} />
+              Run Payroll
+            </Link>
+          </div>
         </div>
 
         {!connected ? (
@@ -373,7 +404,7 @@ export default function DashboardPage() {
           <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 shadow-sm">
-                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">Vault Balance</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">Private Vault Balance</p>
                 <p className="mt-2 text-2xl font-bold tracking-tight text-white">{formatUsd(vaultBalance)}</p>
                 <p className="mt-1 text-xs text-[#a8a8aa]">Live USDC treasury liquidity</p>
               </div>
@@ -385,7 +416,7 @@ export default function DashboardPage() {
               </div>
 
               <div className="rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 shadow-sm">
-                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">Total Disbursed</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">Total Payouts</p>
                 <p className="mt-2 text-2xl font-bold tracking-tight text-white">{formatUsd(totalDisbursed)}</p>
                 <p className="mt-1 text-xs text-[#a8a8aa]">All-time crypto paid to employees</p>
               </div>
@@ -510,6 +541,17 @@ export default function DashboardPage() {
           </>
         )}
       </div>
+
+      <DepositModal
+        isOpen={depositOpen}
+        onClose={() => setDepositOpen(false)}
+        baseBalance={baseBalance}
+        privateBalance={vaultBalance}
+        onDepositSuccess={() => {
+          void refreshVaultBalance();
+          void loadDashboard();
+        }}
+      />
     </EmployerLayout>
   );
 }

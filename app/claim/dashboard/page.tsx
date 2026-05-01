@@ -65,14 +65,13 @@ export default function ClaimDashboardPage() {
     preview: primaryPayrollStream?.preview,
     liveState: primaryPayrollStream?.liveState ?? {
       ready: false,
-      source: "stream-metadata",
+      source: "per-preview",
       reason: "preview-unavailable",
     },
     syncedAt: payrollSummary?.syncedAt,
     nowMs: animatedNowMs,
   });
-  const monthlySalaryAmount = primaryPayrollStream?.preview?.monthlyCapUsd
-    ?? (primaryPayrollStream ? primaryPayrollStream.stream.ratePerSecond * 86400 * cycleInfo.totalDays : 0);
+  const monthlySalaryAmount = primaryPayrollStream?.preview?.monthlyCapUsd ?? null;
   const claimableNowAmount = hasLivePreview ? microToUsdc(animatedClaimableAmountMicro) : null;
   const paidThisCycleAmount = hasLivePreview ? microToUsdc(primaryPayrollStream?.preview?.paidThisCycleMicro) : null;
   const earnedThisMonthAmount =
@@ -80,11 +79,21 @@ export default function ClaimDashboardPage() {
       ? paidThisCycleAmount + claimableNowAmount
       : null;
   const remainingThisMonthAmount =
-    earnedThisMonthAmount !== null ? Math.max(0, monthlySalaryAmount - earnedThisMonthAmount) : null;
-  const claimedThisMonthAmount = primaryPayrollStream ? primaryPayrollStream.stream.totalPaid : 0;
+    earnedThisMonthAmount !== null && monthlySalaryAmount !== null
+      ? Math.max(0, monthlySalaryAmount - earnedThisMonthAmount)
+      : null;
+  const claimedThisMonthAmount = hasLivePreview && primaryPayrollStream ? primaryPayrollStream.stream.totalPaid : null;
 
-  const employmentStatusLabel = primaryPayrollStream?.stream.status === "active" ? "Full Time" : "On Hold";
-  const nextReleaseLabel = "Auto-accruing in real-time";
+  const employmentStatusLabel = !primaryPayrollStream
+    ? "No stream"
+    : hasLivePreview
+      ? primaryPayrollStream.stream.status === "active"
+        ? "Full Time"
+        : "On Hold"
+      : "Awaiting PER sync";
+  const nextReleaseLabel = hasLivePreview
+    ? "Auto-accruing in real-time"
+    : "Sign + refresh to load live PER state";
 
   return (
     <EmployerLayout>
@@ -137,10 +146,10 @@ export default function ClaimDashboardPage() {
                   MagicBlock Payments {magicBlockHealth === "ok" ? "Online" : magicBlockHealth === "error" ? "Degraded" : "Checking"}
                 </span>
               </div>
-              {primaryPayrollStream ? (
-                <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
-                  <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#a8a8aa]">
-                    Data Source: {hasLivePreview ? "Live PER" : "Stream Metadata"}
+              {primaryPayrollStream && hasLivePreview ? (
+                <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-[#1eba98]/25 bg-[#1eba98]/10 px-3 py-1.5">
+                  <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">
+                    Live PER Synced
                   </span>
                 </div>
               ) : null}
@@ -174,8 +183,12 @@ export default function ClaimDashboardPage() {
               <div className="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="rounded-2xl border border-[#1eba98]/35 bg-[#1eba98]/10 p-6">
                   <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">Your {cycleInfo.label} Salary</p>
-                  <p className="mt-2 text-3xl font-bold tracking-tight text-white">${formatUsdc(monthlySalaryAmount, 2)}</p>
-                  <p className="mt-1.5 text-[10px] text-[#9ce8d5]">Monthly context from live rate.</p>
+                  <p className="mt-2 text-3xl font-bold tracking-tight text-white">
+                    {monthlySalaryAmount !== null ? `$${formatUsdc(monthlySalaryAmount, 2)}` : "—"}
+                  </p>
+                  <p className="mt-1.5 text-[10px] text-[#9ce8d5]">
+                    {monthlySalaryAmount !== null ? "Monthly context from live PER state." : "Available after PER sync."}
+                  </p>
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-6">
                   <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#8f8f95]">Earned So Far</p>
@@ -195,7 +208,7 @@ export default function ClaimDashboardPage() {
                   </p>
                   <p className="mt-1.5 text-[10px] text-[#a8a8aa]">
                     {claimableNowAmount !== null
-                      ? `Claimed: $${formatUsdc(claimedThisMonthAmount, 2)}`
+                      ? `Claimed: $${formatUsdc(claimedThisMonthAmount ?? 0, 2)}`
                       : "Sign once to unlock claimable amount"}
                   </p>
                 </div>

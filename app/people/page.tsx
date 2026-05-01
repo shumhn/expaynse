@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import {
   Users,
@@ -13,10 +13,20 @@ import {
   DollarSign,
   TrendingUp,
   Ban,
+  Bell,
+  Wallet,
+  BarChart2,
+  Shield,
 } from "lucide-react";
 import { toast } from "sonner";
 import { EmployerLayout } from "@/components/employer-layout";
 import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
+import {
+  clearCachedTeeToken,
+  getOrCreateCachedTeeToken,
+  loadCachedTeeToken,
+} from "@/lib/client/tee-auth-cache";
+import { fetchTeeAuthToken, isJwtExpired } from "@/lib/magicblock-api";
 import {
   monthlyUsdToRatePerSecond,
 } from "@/lib/payroll-math";
@@ -62,6 +72,27 @@ interface StreamInfo {
   delegatedAt: string | null;
   recipientPrivateInitializedAt?: string | null;
   checkpointCrankStatus?: "idle" | "pending" | "active" | "failed" | "stopped" | null;
+}
+
+interface PrivatePayrollStateResponse {
+  stream: {
+    id: string;
+    status: "active" | "paused" | "stopped";
+    lastPaidAt: string | null;
+    totalPaid: number;
+    employeePda?: string | null;
+    privatePayrollPda?: string | null;
+    permissionPda?: string | null;
+    delegatedAt?: string | null;
+  };
+  state: {
+    status: "active" | "paused" | "stopped";
+    accruedUnpaidMicro: string;
+    totalPaidPrivateMicro: string;
+    effectiveClaimableAmountMicro: string;
+    lastAccrualTimestamp: string;
+  };
+  syncedAt: string;
 }
 
 function shorten(addr: string) {
@@ -190,12 +221,16 @@ const ROLE_OPTIONS_BY_DEPARTMENT: Record<string, string[]> = {
   Support: ["Support Specialist", "Customer Success", "Support Lead"],
 };
 
+const PER_PREVIEW_MAX_STALENESS_MS = 15_000;
+
 export default function PeoplePage() {
   const { publicKey, signMessage } = useWallet();
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [streams, setStreams] = useState<StreamInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [filterDepartment, setFilterDepartment] = useState<string>("All Departments");
+  const [filterStatus, setFilterStatus] = useState<"All" | "Active" | "Inactive">("All");
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState("");
   const [newWallet, setNewWallet] = useState("");
@@ -213,6 +248,13 @@ export default function PeoplePage() {
     getDefaultStartDateTime(),
   );
   const [now, setNow] = useState(() => Date.now());
+  const [privateStates, setPrivateStates] = useState<
+    Record<string, PrivatePayrollStateResponse>
+  >({});
+  const [missingPrivateStates, setMissingPrivateStates] = useState<
+    Record<string, boolean>
+  >({});
+  const tokenCache = useRef<string | null>(null);
 
   // Live ticker: update every second for real-time accruing display
   useEffect(() => {
@@ -220,22 +262,158 @@ export default function PeoplePage() {
     return () => clearInterval(interval);
   }, []);
 
-  function getLiveAccrued(stream: StreamInfo, canAccrue: boolean) {
-    if (stream.status !== "active" || !canAccrue) return stream.totalPaid;
-    const anchor = stream.lastPaidAt ?? stream.startsAt;
-    if (!anchor) return stream.totalPaid;
-    const elapsedSec = Math.max(0, (now - new Date(anchor).getTime()) / 1000);
-    return stream.totalPaid + elapsedSec * stream.ratePerSecond;
+  function isFreshPrivatePreview(
+    preview: PrivatePayrollStateResponse | null | undefined,
+    nowMs: number,
+  ) {
+    if (!preview?.syncedAt) return false;
+    const syncedAtMs = Date.parse(preview.syncedAt);
+    if (!Number.isFinite(syncedAtMs)) return false;
+    return nowMs - syncedAtMs <= PER_PREVIEW_MAX_STALENESS_MS;
+  }
+
+  function getLiveAccrued(preview?: PrivatePayrollStateResponse | null) {
+    if (preview) {
+      const accruedUnpaid = Number(preview.state.accruedUnpaidMicro) / 1_000_000;
+      const totalPaidPrivate =
+        Number(preview.state.totalPaidPrivateMicro) / 1_000_000;
+      if (Number.isFinite(accruedUnpaid) && Number.isFinite(totalPaidPrivate)) {
+        return Math.max(0, accruedUnpaid + totalPaidPrivate);
+      }
+    }
+    return null;
   }
   const [adding, setAdding] = useState(false);
 
   const walletAddr = publicKey?.toBase58();
 
   useEffect(() => {
+    tokenCache.current = null;
+    if (publicKey) {
+      clearCachedTeeToken(publicKey.toBase58());
+    }
+  }, [publicKey]);
+
+  const getOrFetchToken = useCallback(async () => {
+    if (tokenCache.current && !isJwtExpired(tokenCache.current)) {
+      return tokenCache.current;
+    }
+
+    if (!publicKey || !signMessage) {
+      throw new Error("Wallet does not support message signing");
+    }
+
+    const wallet = publicKey.toBase58();
+    const persisted = loadCachedTeeToken(wallet);
+    if (persisted && !isJwtExpired(persisted)) {
+      tokenCache.current = persisted;
+      return persisted;
+    }
+
+    const token = await getOrCreateCachedTeeToken(wallet, async () =>
+      fetchTeeAuthToken(publicKey, signMessage),
+    );
+    tokenCache.current = token;
+    return token;
+  }, [publicKey, signMessage]);
+
+  const fetchPrivatePreview = useCallback(
+    async (stream: StreamInfo, options?: { silent?: boolean }) => {
+      if (!walletAddr) return;
+      if (!stream.privatePayrollPda || !stream.employeePda || !stream.delegatedAt) {
+        return;
+      }
+
+      try {
+        const token = await getOrFetchToken();
+        const response = await fetch(
+          `/api/payroll/state?employerWallet=${walletAddr}&streamId=${stream.id}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        );
+        const json = (await response.json()) as
+          | PrivatePayrollStateResponse
+          | { error?: string };
+
+        if (!response.ok) {
+          const message =
+            "error" in json ? json.error || "Failed to load PER state" : "Failed to load PER state";
+          const normalized = message.toLowerCase();
+          const missing =
+            response.status === 404 ||
+            normalized.includes("private payroll state not found") ||
+            normalized.includes("private payroll state account is not initialized") ||
+            normalized.includes("private state expired");
+          if (missing) {
+            setPrivateStates((prev) => {
+              const next = { ...prev };
+              delete next[stream.id];
+              return next;
+            });
+            setMissingPrivateStates((prev) => ({ ...prev, [stream.id]: true }));
+            setStreams((prev) =>
+              prev.map((existing) =>
+                existing.id === stream.id ? { ...existing, status: "stopped" } : existing,
+              ),
+            );
+            if (!options?.silent) {
+              toast.info(
+                "PER state is missing for this stream (not initialized, cleaned up, or replaced).",
+              );
+            }
+            return;
+          }
+          throw new Error(message);
+        }
+
+        const preview = json as PrivatePayrollStateResponse;
+        setPrivateStates((prev) => ({ ...prev, [stream.id]: preview }));
+        setMissingPrivateStates((prev) => {
+          const next = { ...prev };
+          delete next[stream.id];
+          return next;
+        });
+        setStreams((prev) =>
+          prev.map((existing) =>
+            existing.id === stream.id
+              ? {
+                ...existing,
+                status: preview.state.status,
+                lastPaidAt: preview.stream.lastPaidAt ?? existing.lastPaidAt,
+                totalPaid: preview.stream.totalPaid ?? existing.totalPaid,
+              }
+              : existing,
+          ),
+        );
+      } catch (error: unknown) {
+        setPrivateStates((prev) => {
+          const next = { ...prev };
+          delete next[stream.id];
+          return next;
+        });
+        setMissingPrivateStates((prev) => {
+          const next = { ...prev };
+          delete next[stream.id];
+          return next;
+        });
+        if (!options?.silent) {
+          toast.error(error instanceof Error ? error.message : "Failed to sync PER state");
+        }
+      }
+    },
+    [walletAddr, getOrFetchToken],
+  );
+
+  useEffect(() => {
     if (!walletAddr || !signMessage) {
       const timeoutId = window.setTimeout(() => {
         setEmployees([]);
         setStreams([]);
+        setPrivateStates({});
+        setMissingPrivateStates({});
       }, 0);
       return () => window.clearTimeout(timeoutId);
     }
@@ -272,11 +450,109 @@ export default function PeoplePage() {
     };
   }, [walletAddr, signMessage]);
 
-  const filtered = employees.filter(
-    (e) =>
-      e.name.toLowerCase().includes(search.toLowerCase()) ||
-      e.wallet.toLowerCase().includes(search.toLowerCase()),
-  );
+  useEffect(() => {
+    if (!walletAddr || !signMessage) return;
+    const active = streams.filter(
+      (stream) =>
+        stream.status === "active" &&
+        !!stream.privatePayrollPda &&
+        !!stream.employeePda &&
+        !!stream.delegatedAt,
+    );
+    if (active.length === 0) return;
+
+    const timer = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      for (const stream of active) {
+        void fetchPrivatePreview(stream, { silent: true });
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [walletAddr, signMessage, streams, fetchPrivatePreview]);
+
+  const resolveEffectiveStatus = (
+    stream: StreamInfo | null | undefined,
+    preview?: PrivatePayrollStateResponse | null,
+  ) => {
+    if (!stream) return "stopped" as const;
+    if (missingPrivateStates[stream.id]) return "stopped" as const;
+    return (preview?.state.status ?? stream.status) as StreamInfo["status"];
+  };
+
+  const filtered = employees.filter((e) => {
+    const matchesSearch = e.name.toLowerCase().includes(search.toLowerCase()) || e.wallet.toLowerCase().includes(search.toLowerCase());
+    const matchesDepartment = filterDepartment === "All Departments" || e.department === filterDepartment;
+
+    let matchesStatus = true;
+    if (filterStatus !== "All") {
+      const stream = streams.find((s) => s.employeeId === e.id);
+      const preview = stream ? (privateStates[stream.id] ?? null) : null;
+      const hasFutureStart = Boolean(
+        stream?.startsAt && new Date(stream.startsAt).getTime() > now,
+      );
+      const isActive =
+        !!stream &&
+        resolveEffectiveStatus(stream, preview) === "active" &&
+        isPerReady(stream) &&
+        !hasFutureStart &&
+        !missingPrivateStates[stream.id] &&
+        isFreshPrivatePreview(preview, now);
+      matchesStatus = filterStatus === "Active" ? isActive : !isActive;
+    }
+
+    return matchesSearch && matchesDepartment && matchesStatus;
+  });
+
+  const activeCount = employees.filter(e => {
+    const stream = streams.find(s => s.employeeId === e.id);
+    if (!stream) return false;
+    const preview = privateStates[stream.id] ?? null;
+    const hasFutureStart = Boolean(
+      stream.startsAt && new Date(stream.startsAt).getTime() > now,
+    );
+    return (
+      resolveEffectiveStatus(stream, preview) === "active" &&
+      isPerReady(stream) &&
+      !hasFutureStart &&
+      !missingPrivateStates[stream.id] &&
+      isFreshPrivatePreview(preview, now)
+    );
+  }).length;
+
+  const totalPayroll = employees.reduce((sum, e) => {
+    const stream = streams.find(s => s.employeeId === e.id);
+    const preview = stream ? (privateStates[stream.id] ?? null) : null;
+    const hasFutureStart = Boolean(
+      stream?.startsAt && new Date(stream.startsAt).getTime() > now,
+    );
+    const isActive =
+      !!stream &&
+      resolveEffectiveStatus(stream, preview) === "active" &&
+      isPerReady(stream) &&
+      !hasFutureStart &&
+      !missingPrivateStates[stream.id] &&
+      isFreshPrivatePreview(preview, now);
+    if (isActive && stream) {
+      if (e.monthlySalaryUsd) {
+        return sum + e.monthlySalaryUsd;
+      } else if (e.compensationAmountUsd && e.compensationUnit === "monthly") {
+        return sum + e.compensationAmountUsd;
+      } else {
+        return sum + (stream.ratePerSecond * 86400 * 30);
+      }
+    }
+    return sum;
+  }, 0);
+
+  const uniqueDepartments = new Set(employees.map(e => e.department).filter(Boolean)).size;
+
+  const perReadyCount = employees.filter(e => {
+    const stream = streams.find(s => s.employeeId === e.id);
+    return isPerReady(stream ?? null) && !(stream && missingPrivateStates[stream.id]);
+  }).length;
+
+  const perReadyPercentage = employees.length > 0 ? Math.round((perReadyCount / employees.length) * 100) : 0;
+
 
   const getStream = (empId: string) =>
     streams.find((s) => s.employeeId === empId);
@@ -381,36 +657,120 @@ export default function PeoplePage() {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
           <div>
             <h1 className="text-2xl font-bold text-white tracking-tight">
-              Payroll
+              Employees
             </h1>
             <p className="text-sm text-[#8f8f95] mt-1">
-              {filtered.length} employee{filtered.length !== 1 ? "s" : ""} on payroll
+              Manage your team and payroll settings
             </p>
           </div>
           <div className="flex items-center gap-3">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#a8a8aa]" size={16} />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search team..."
-                className="pl-9 pr-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder:text-[#a8a8aa] focus:outline-none focus:border-[#1eba98] focus:ring-1 focus:ring-[#1eba98]/20 w-48"
-              />
-            </div>
+            <button className="w-[42px] h-[42px] flex items-center justify-center rounded-xl bg-white/5 border border-white/10 text-white hover:bg-white/10 transition-colors">
+              <Bell size={18} className="text-[#a8a8aa]" />
+            </button>
             <button
               onClick={() => setShowAdd(true)}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#1eba98] hover:bg-[#1eba98]/80 text-black text-[10px] font-bold uppercase tracking-widest rounded-xl transition-all shadow-sm active:scale-[0.98] disabled:opacity-50"
+              className="inline-flex items-center gap-2 px-5 py-[11px] bg-[#1eba98] hover:bg-[#1eba98]/80 text-black text-xs font-bold rounded-xl transition-all shadow-sm active:scale-[0.98] disabled:opacity-50"
             >
-              <Plus size={14} />
-              Add employee
+              <Plus size={16} />
+              Add Employee
             </button>
           </div>
         </div>
 
+        {/* Stat Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <div className="rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 shadow-sm">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">Total Employees</p>
+            <p className="mt-2 text-2xl font-bold tracking-tight text-white">{employees.length}</p>
+            <p className="mt-1 text-xs text-[#a8a8aa]">{activeCount} active</p>
+          </div>
+
+          <div className="rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 shadow-sm">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">Monthly Payroll</p>
+            <p className="mt-2 text-2xl font-bold tracking-tight text-white">{formatCurrency(totalPayroll)}</p>
+            <p className="mt-1 text-xs text-[#a8a8aa]">All employees</p>
+          </div>
+
+          <div className="rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 shadow-sm">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">Departments</p>
+            <p className="mt-2 text-2xl font-bold tracking-tight text-white">{uniqueDepartments}</p>
+            <p className="mt-1 text-xs text-[#a8a8aa]">Across the company</p>
+          </div>
+
+          <div className="rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 shadow-sm">
+            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">TEE Secured</p>
+            <p className="mt-2 text-2xl font-bold tracking-tight text-white">{perReadyPercentage}%</p>
+            <p className="mt-1 text-xs text-[#a8a8aa]">PER active streams</p>
+          </div>
+        </div>
+
+        {/* Table Section */}
         <div className="bg-[#0a0a0a] border border-white/5 rounded-3xl overflow-hidden shadow-sm">
+          {/* Table Toolbar */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 p-6 border-b border-white/5">
+            <h2 className="text-lg font-bold text-white tracking-tight">All Employees</h2>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#a8a8aa]" size={16} />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search employees..."
+                  className="pl-9 pr-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder:text-[#a8a8aa] focus:outline-none focus:border-[#1eba98] focus:ring-1 focus:ring-[#1eba98]/20 w-48 lg:w-56"
+                />
+              </div>
+
+              <div className="relative">
+                <select
+                  value={filterDepartment}
+                  onChange={(e) => setFilterDepartment(e.target.value)}
+                  className="pl-4 pr-10 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white focus:outline-none appearance-none cursor-pointer hover:bg-white/10 transition-colors"
+                >
+                  <option value="All Departments">All Departments</option>
+                  {DEPARTMENT_OPTIONS.map(d => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-[#a8a8aa]">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+                </div>
+              </div>
+
+              <div className="flex bg-white/5 p-1 rounded-xl border border-white/10">
+                {(["All", "Active", "Inactive"] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setFilterStatus(tab)}
+                    className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-colors ${filterStatus === tab
+                      ? "bg-white text-black shadow-sm"
+                      : "text-[#a8a8aa] hover:text-white"
+                      }`}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Table Headers */}
+          {!loading && filtered.length > 0 && (
+            <div className="grid grid-cols-[1.5fr_1fr_1fr_1.2fr_1fr_1fr_1fr] gap-4 items-center px-6 py-4 border-b border-white/5 bg-white/[0.02]">
+              <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Employee</div>
+              <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Start Date</div>
+              <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Salary</div>
+              <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Accrued Live</div>
+              <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Privacy</div>
+              <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Status</div>
+              <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest text-right">Actions</div>
+            </div>
+          )}
+
+
           {loading ? (
-            <div className="py-24 flex flex-col items-center justify-center">
+            <div className="py-24 flex flex-col items-center justify-center border-t border-white/5">
               <Loader2 size={24} className="text-[#1eba98] animate-spin mb-4" />
               <p className="text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa]">Syncing team data...</p>
             </div>
@@ -419,25 +779,35 @@ export default function PeoplePage() {
               <div className="w-16 h-16 rounded-3xl bg-white/5 flex items-center justify-center mb-6">
                 <Users size={24} className="text-[#a8a8aa]/40" />
               </div>
-              <p className="text-base font-bold text-white tracking-tight">No team members yet</p>
+              <p className="text-base font-bold text-white tracking-tight">No employees found</p>
               <p className="text-xs text-[#a8a8aa] mt-1 max-w-[240px] leading-relaxed">
-                Employees will appear here once they are onboarded to payroll.
+                Try adjusting your search or filters
               </p>
             </div>
           ) : (
             <div className="divide-y divide-white/5">
               {filtered.map((emp) => {
                 const stream = getStream(emp.id) ?? null;
-                const status = stream?.status ?? "stopped";
+                const preview = stream ? (privateStates[stream.id] ?? null) : null;
+                const hasFreshPreview = isFreshPrivatePreview(preview, now);
+                const hasMissingPrivateState = !!(stream && missingPrivateStates[stream.id]);
+                const status = resolveEffectiveStatus(stream, preview);
                 const hasFutureStart = Boolean(
                   stream?.startsAt && new Date(stream.startsAt).getTime() > now,
                 );
                 const perReady = isPerReady(stream);
                 const isStreamingLive =
-                  Boolean(stream) && status === "active" && perReady && !hasFutureStart;
+                  Boolean(stream) &&
+                  status === "active" &&
+                  perReady &&
+                  !hasFutureStart &&
+                  !hasMissingPrivateState &&
+                  hasFreshPreview;
                 const statusLabel =
                   isStreamingLive
                     ? "Streaming"
+                    : hasMissingPrivateState
+                      ? "State missing"
                     : hasFutureStart
                       ? "Scheduled"
                       : status === "active"
@@ -448,6 +818,8 @@ export default function PeoplePage() {
                 const statusColor =
                   isStreamingLive
                     ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/30"
+                    : hasMissingPrivateState
+                      ? "bg-rose-500/15 text-rose-300 border-rose-400/30"
                     : hasFutureStart
                       ? "bg-blue-500/15 text-blue-300 border-blue-400/30"
                       : status === "active"
@@ -463,7 +835,7 @@ export default function PeoplePage() {
                 return (
                   <div
                     key={emp.id}
-                    className="flex items-center justify-between px-6 py-5 hover:bg-white/5 transition-all duration-200"
+                    className="grid grid-cols-[1.5fr_1fr_1fr_1.2fr_1fr_1fr_1fr] gap-4 items-center px-6 py-5 hover:bg-white/5 transition-all duration-200"
                   >
                     <div className="flex items-center gap-4">
                       <div className="w-10 h-10 rounded-2xl bg-white/5 flex items-center justify-center shrink-0">
@@ -478,54 +850,31 @@ export default function PeoplePage() {
                         <p className="text-[11px] text-[#8f8f95] font-mono truncate">
                           {shorten(emp.wallet)}
                         </p>
-                        {(emp.role || emp.department) && (
-                          <p className="text-[11px] text-[#7a7a82] truncate mt-0.5">
-                            {[emp.role, emp.department].filter(Boolean).join(" · ")}
-                          </p>
-                        )}
                       </div>
                     </div>
 
-                    {/* Type */}
-                    <div>
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-lg text-[11px] font-bold bg-blue-500/15 text-blue-300 border border-blue-400/30">
-                        {getEmploymentTypeLabel(emp.employmentType)}
-                      </span>
-                    </div>
-
                     {/* Start Date */}
-                    <div className="flex items-center gap-1.5 text-sm text-[#b6b6bc]">
-                      <Calendar size={12} className="text-[#8f8f95]" />
+                    <div className="flex items-center gap-1.5 text-sm text-[#b6b6bc] whitespace-nowrap">
+                      <Calendar size={12} className="text-[#8f8f95] shrink-0" />
                       {new Date(emp.startDate ?? emp.createdAt).toLocaleDateString(
                         "en-US",
                         {
-                          month: "short",
+                          month: "2-digit",
                           day: "2-digit",
-                          year: "numeric",
+                          year: "2-digit",
                         },
                       )}
                     </div>
 
                     {/* Salary */}
-                    <div>
+                    <div className="min-w-0">
                       {emp.monthlySalaryUsd ? (
                         <div>
                           <div className="flex items-center gap-1">
-                            <DollarSign size={12} className="text-emerald-500" />
-                            <span className="text-sm font-semibold text-white">
+                            <span className="text-sm font-semibold text-white truncate">
                               {formatCurrency(emp.monthlySalaryUsd)}
                             </span>
                           </div>
-                          {compensationBasis && (
-                            <p className="text-[10px] text-[#8f8f95] mt-1">
-                              Input: {compensationBasis}
-                            </p>
-                          )}
-                          {dailyRate && (
-                            <p className="text-[10px] text-[#8f8f95] mt-1">
-                              {dailyRate} USDC/day
-                            </p>
-                          )}
                         </div>
                       ) : (
                         <span className="text-sm text-[#8f8f95]">—</span>
@@ -533,7 +882,7 @@ export default function PeoplePage() {
                     </div>
 
                     {/* Accrued Live */}
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 whitespace-nowrap min-w-0">
                       {stream && isStreamingLive ? (
                         <>
                           <span className="relative flex h-2 w-2 mr-1">
@@ -541,24 +890,28 @@ export default function PeoplePage() {
                             <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                           </span>
                           <span className="text-sm font-semibold text-emerald-700 font-mono tabular-nums">
-                            {getLiveAccrued(stream, isStreamingLive).toFixed(6)}
+                            {getLiveAccrued(preview)?.toFixed(6) ?? "—"}
                           </span>
                         </>
                       ) : (
                         <>
                           <TrendingUp size={12} className="text-[#8f8f95]" />
-                          <span className="text-sm font-semibold text-white font-mono">
-                            {stream ? stream.totalPaid.toFixed(4) : "0"}
+                          <span className={status === "active" ? "font-bold text-amber-300" : "text-[#b6b6bc]"}>
+                            {status === "active" ? "Needs sync" : "—"}
                           </span>
                         </>
                       )}
-                      <span className="text-[10px] text-[#8f8f95]">USDC</span>
                     </div>
 
                     {/* Private */}
                     <div>
                       {(() => {
-                        const readiness = getPrivateReadiness(stream);
+                        const readiness = hasMissingPrivateState
+                          ? {
+                            label: "Expired",
+                            className: "bg-rose-500/15 text-rose-300 border-rose-400/30",
+                          }
+                          : getPrivateReadiness(stream);
                         return (
                           <span
                             className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border ${readiness.className}`}
@@ -643,14 +996,14 @@ export default function PeoplePage() {
           >
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-bold text-white">Add employee</h2>
-              <button 
+              <button
                 onClick={() => setShowAdd(false)}
                 className="w-8 h-8 flex items-center justify-center rounded-full bg-white/5 text-[#8f8f95] hover:text-white hover:bg-white/10 transition-colors"
               >
                 &times;
               </button>
             </div>
-            
+
             <div className="space-y-5">
               <div>
                 <label className="text-[11px] font-bold text-[#8f8f95] uppercase tracking-wider mb-1.5 block">

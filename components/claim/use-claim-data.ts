@@ -63,7 +63,13 @@ export interface EmployeePayrollSummaryResponse {
     liveState: {
       ready: boolean;
       source: "per-preview" | "stream-metadata";
-      reason: "preview-available" | "tee-token-missing" | "stream-not-delegated" | "private-account-not-initialized" | "preview-unavailable";
+      reason:
+        | "preview-available"
+        | "tee-token-missing"
+        | "stream-not-delegated"
+        | "private-account-not-initialized"
+        | "private-state-missing"
+        | "preview-unavailable";
     };
     preview: {
       employeePda: string;
@@ -123,6 +129,7 @@ export function useClaimData() {
         summary.streams.some(
           (stream) =>
             stream.liveState?.reason === "tee-token-missing" ||
+            stream.liveState?.reason === "private-state-missing" ||
             stream.liveState?.reason === "preview-unavailable",
         )
       ) {

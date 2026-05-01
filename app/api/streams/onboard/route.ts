@@ -48,15 +48,7 @@ type BuildOnboardingResponse = {
   permissionPda: string;
   alreadyOnboarded?: boolean;
   transactions: {
-    createEmployee?: {
-      transactionBase64: string;
-      sendTo: "base";
-    };
-    createPermission?: {
-      transactionBase64: string;
-      sendTo: "base";
-    };
-    delegateBundle?: {
+    baseSetup?: {
       transactionBase64: string;
       sendTo: "base";
     };
@@ -251,7 +243,8 @@ export async function POST(request: NextRequest) {
     const typedBaseProgram = baseProgram as anchor.Program<Idl>;
     const typedTeeProgram = teeProgram as anchor.Program<Idl>;
 
-    let createEmployeeSerialized: Uint8Array | undefined;
+    const baseInstructions: anchor.web3.TransactionInstruction[] = [];
+
     if (!employeeExistsOnBase) {
       const createEmployeeIx = await typedBaseProgram.methods
         .createEmployee(streamSeedArg)
@@ -261,15 +254,9 @@ export async function POST(request: NextRequest) {
           systemProgram: SystemProgram.programId,
         })
         .instruction();
-
-      createEmployeeSerialized = await serializeUnsignedTransaction(
-        baseConnection,
-        employerPubkey,
-        new Transaction().add(createEmployeeIx),
-      );
+      baseInstructions.push(createEmployeeIx);
     }
 
-    let createPermissionSerialized: Uint8Array | undefined;
     if (!permissionExistsOnBase) {
       const createPermissionIx = await typedBaseProgram.methods
         .createPermission(streamSeedArg)
@@ -281,47 +268,38 @@ export async function POST(request: NextRequest) {
           systemProgram: SystemProgram.programId,
         })
         .instruction();
-
-      createPermissionSerialized = await serializeUnsignedTransaction(
-        baseConnection,
-        employerPubkey,
-        new Transaction().add(createPermissionIx),
-      );
+      baseInstructions.push(createPermissionIx);
     }
 
-    let delegateBundleSerialized: Uint8Array | undefined;
-    if (!privatePayrollExistsOnTee) {
-      const delegateInstructions = [];
+    if (!permissionExistsOnBase || !permissionDelegated) {
+      const delegatePermissionIx = createDelegatePermissionInstruction({
+        payer: employerPubkey,
+        authority: [employerPubkey, true],
+        permissionedAccount: [employeePda, false],
+        ownerProgram: PERMISSION_PROGRAM_ID,
+        validator: DEVNET_TEE_VALIDATOR,
+      });
+      baseInstructions.push(delegatePermissionIx);
+    }
 
-      if (!permissionExistsOnBase || !permissionDelegated) {
-        const delegatePermissionIx = createDelegatePermissionInstruction({
-          payer: employerPubkey,
-          authority: [employerPubkey, true],
-          permissionedAccount: [employeePda, false],
-          ownerProgram: PERMISSION_PROGRAM_ID,
-          validator: DEVNET_TEE_VALIDATOR,
-        });
-        delegateInstructions.push(delegatePermissionIx);
-      }
+    if (!employeeDelegated) {
+      const delegateEmployeeIx = await typedBaseProgram.methods
+        .delegateEmployee(streamSeedArg)
+        .accounts({
+          employer: employerPubkey,
+          employee: employeePda,
+        })
+        .instruction();
+      baseInstructions.push(delegateEmployeeIx);
+    }
 
-      if (!employeeDelegated) {
-        const delegateEmployeeIx = await typedBaseProgram.methods
-          .delegateEmployee(streamSeedArg)
-          .accounts({
-            employer: employerPubkey,
-            employee: employeePda,
-          })
-          .instruction();
-        delegateInstructions.push(delegateEmployeeIx);
-      }
-
-      if (delegateInstructions.length > 0) {
-        delegateBundleSerialized = await serializeUnsignedTransaction(
-          baseConnection,
-          employerPubkey,
-          new Transaction().add(...delegateInstructions),
-        );
-      }
+    let baseSetupSerialized: Uint8Array | undefined;
+    if (baseInstructions.length > 0) {
+      baseSetupSerialized = await serializeUnsignedTransaction(
+        baseConnection,
+        employerPubkey,
+        new Transaction().add(...baseInstructions),
+      );
     }
 
     let initializePrivatePayrollSerialized: Uint8Array | undefined;
@@ -348,31 +326,11 @@ export async function POST(request: NextRequest) {
       permissionPda: permissionPda.toBase58(),
       alreadyOnboarded: false,
       transactions: {
-        ...(createEmployeeSerialized
+        ...(baseSetupSerialized
           ? {
-              createEmployee: {
+              baseSetup: {
                 transactionBase64: Buffer.from(
-                  createEmployeeSerialized,
-                ).toString("base64"),
-                sendTo: "base" as const,
-              },
-            }
-          : {}),
-        ...(createPermissionSerialized
-          ? {
-              createPermission: {
-                transactionBase64: Buffer.from(
-                  createPermissionSerialized,
-                ).toString("base64"),
-                sendTo: "base" as const,
-              },
-            }
-          : {}),
-        ...(delegateBundleSerialized
-          ? {
-              delegateBundle: {
-                transactionBase64: Buffer.from(
-                  delegateBundleSerialized,
+                  baseSetupSerialized,
                 ).toString("base64"),
                 sendTo: "base" as const,
               },

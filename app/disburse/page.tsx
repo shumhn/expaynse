@@ -150,15 +150,7 @@ interface OnboardTransactionsResponse {
   permissionPda: string;
   alreadyOnboarded?: boolean;
   transactions: {
-    createEmployee?: {
-      transactionBase64: string;
-      sendTo: "base";
-    };
-    createPermission?: {
-      transactionBase64: string;
-      sendTo: "base";
-    };
-    delegateBundle?: {
+    baseSetup?: {
       transactionBase64: string;
       sendTo: "base";
     };
@@ -374,6 +366,15 @@ function getEffectiveStreamStatus(
   return preview?.state.status ?? preview?.stream.status ?? stream?.status ?? null;
 }
 
+function isMissingPrivateStateMessage(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("private payroll state not found") ||
+    normalized.includes("private payroll state account is not initialized") ||
+    normalized.includes("private state expired")
+  );
+}
+
 function EmployerPageContent() {
   const searchParams = useSearchParams();
   const { publicKey, connected, signTransaction, signMessage } = useWallet();
@@ -511,11 +512,23 @@ function EmployerPageContent() {
     [managedEmployees, focusedEmployeeId],
   );
 
+  const resolveStatusWithMissing = useCallback(
+    (
+      stream: PayrollStream | null | undefined,
+      preview?: PrivatePayrollStateResponse | null,
+    ): StreamStatus | null => {
+      if (!stream) return null;
+      if (missingPrivateStates[stream.id]) return "stopped";
+      return getEffectiveStreamStatus(stream, preview);
+    },
+    [missingPrivateStates],
+  );
+
   const salaryAllocationRows = useMemo(() => {
     return managedEmployees.map((employee) => {
       const stream = employeeStreamMap.get(employee.id) ?? null;
       const preview = stream ? (privateStates[stream.id] ?? null) : null;
-      const status = getEffectiveStreamStatus(stream, preview) ?? "paused";
+      const status = resolveStatusWithMissing(stream, preview) ?? "paused";
       const ratePerSecond = stream?.ratePerSecond ?? 0;
       const employeeCycle = getScheduleCycleSnapshot(
         employee.paySchedule,
@@ -556,6 +569,7 @@ function EmployerPageContent() {
     managedEmployees,
     employeeStreamMap,
     privateStates,
+    resolveStatusWithMissing,
     nowMs,
   ]);
 
@@ -609,7 +623,7 @@ function EmployerPageContent() {
     for (const employee of visibleManagedEmployees) {
       const stream = employeeStreamMap.get(employee.id) ?? null;
       const preview = stream ? (privateStates[stream.id] ?? null) : null;
-      const status = getEffectiveStreamStatus(stream, preview);
+      const status = resolveStatusWithMissing(stream, preview);
 
       if (!stream?.employeePda || !stream?.privatePayrollPda || !stream?.permissionPda) {
         perMissing += 1;
@@ -629,7 +643,7 @@ function EmployerPageContent() {
       recipientMissing,
       paused,
     };
-  }, [visibleManagedEmployees, employeeStreamMap, privateStates]);
+  }, [visibleManagedEmployees, employeeStreamMap, privateStates, resolveStatusWithMissing]);
 
   const formatMicroUsdc = useCallback((value: string) => {
     const parsed = Number(value);
@@ -882,9 +896,7 @@ function EmployerPageContent() {
         return stateResponse;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Unknown";
-        const missingPrivateState =
-          message.includes("Private payroll state not found in PER") ||
-          message.toLowerCase().includes("private payroll state not found");
+        const missingPrivateState = isMissingPrivateStateMessage(message);
 
         if (missingPrivateState) {
           setPrivateStates((prev) => {
@@ -896,6 +908,11 @@ function EmployerPageContent() {
             ...prev,
             [stream.id]: true,
           }));
+          setStreams((prev) =>
+            prev.map((existing) =>
+              existing.id === stream.id ? { ...existing, status: "stopped" } : existing,
+            ),
+          );
 
           if (!silent) {
             if (stream.status === "stopped") {
@@ -903,7 +920,9 @@ function EmployerPageContent() {
                 "This stopped stream no longer has a private payroll state in PER. Restart can proceed now.",
               );
             } else {
-              toast.info("Private payroll state is no longer present in PER.");
+              toast.info(
+                "PER state is missing for this stream (not initialized, cleaned up, or replaced).",
+              );
             }
           }
 
@@ -1050,11 +1069,7 @@ function EmployerPageContent() {
                       ? json.error || "Failed to load exact PER payroll state"
                       : "Failed to load exact PER payroll state";
                   const missingPrivateState =
-                    response.status === 404 ||
-                    message.includes("Private payroll state not found in PER") ||
-                    message
-                      .toLowerCase()
-                      .includes("private payroll state account is not initialized");
+                    response.status === 404 || isMissingPrivateStateMessage(message);
 
                   if (missingPrivateState) {
                     setPrivateStates((prev) => {
@@ -1066,6 +1081,13 @@ function EmployerPageContent() {
                       ...prev,
                       [stream.id]: true,
                     }));
+                    setStreams((prev) =>
+                      prev.map((existing) =>
+                        existing.id === stream.id
+                          ? { ...existing, status: "stopped" }
+                          : existing,
+                      ),
+                    );
                   }
                   return;
                 }
@@ -1746,7 +1768,57 @@ function EmployerPageContent() {
       try {
         const teeAuthToken = await getOrFetchToken();
         const cachedPreview = privateStates[stream.id] ?? null;
+        const isKnownMissing = !!missingPrivateStates[stream.id];
         let effectiveStatus = getEffectiveStreamStatus(stream, cachedPreview);
+
+        if (isKnownMissing) {
+          if (action === "stop") {
+            setStreams((prev) =>
+              prev.map((existing) =>
+                existing.id === stream.id
+                  ? {
+                    ...existing,
+                    status: "stopped",
+                  }
+                  : existing,
+              ),
+            );
+            await fetchPayrollConfig();
+            toast.info(
+              "No private payroll state remains in PER for this stream. Marked as stopped locally.",
+            );
+            return;
+          }
+
+          toast.info(
+            "Private payroll state is missing in PER. Restart/onboard this stream before resume or pause.",
+          );
+          return;
+        }
+
+        if (action === "stop") {
+          const preStopPreview = await fetchPrivatePreview(stream, {
+            silent: true,
+          });
+          if (preStopPreview === "missing") {
+            setStreams((prev) =>
+              prev.map((existing) =>
+                existing.id === stream.id
+                  ? {
+                    ...existing,
+                    status: "stopped",
+                  }
+                  : existing,
+              ),
+            );
+            await fetchPayrollConfig();
+            toast.info(
+              "Private payroll state is already absent in PER. Nothing left to stop.",
+            );
+            return;
+          }
+          effectiveStatus = getEffectiveStreamStatus(stream, preStopPreview);
+        }
 
         if (
           (action === "resume" && effectiveStatus !== "paused") ||
@@ -1971,6 +2043,18 @@ function EmployerPageContent() {
           toast.info(
             "This stream is not active on-chain. The dashboard is refreshing to sync the real status.",
           );
+        } else if (
+          action === "stop" &&
+          (message.includes("0xbc4") ||
+            message.includes("custom program error: 0xbc4") ||
+            message.includes("already stopped") ||
+            message.includes("not active"))
+        ) {
+          await fetchPrivatePreview(stream);
+          await fetchPayrollConfig();
+          toast.info(
+            "Stop was rejected by current on-chain state. Synced latest stream status from PER.",
+          );
         } else {
           toast.error(`Stream control failed: ${message}`);
         }
@@ -1991,6 +2075,7 @@ function EmployerPageContent() {
       fetchCashoutRequests,
       fetchPrivatePreview,
       buildCheckpointCrankAndFinalize,
+      missingPrivateStates,
     ],
   );
 
@@ -2218,7 +2303,7 @@ function EmployerPageContent() {
           json = JSON.parse(responseText) as
             | OnboardTransactionsResponse
             | { error?: string; message?: string };
-        } catch (parseErr) {
+        } catch {
           throw new Error(
             `Server returned non-JSON response (status ${response.status}): ${responseText.slice(0, 200)}`
           );
@@ -2240,46 +2325,24 @@ function EmployerPageContent() {
 
         const onboarding = json as OnboardTransactionsResponse;
         const transactionCount = [
-          onboarding.transactions.createEmployee,
-          onboarding.transactions.createPermission,
-          onboarding.transactions.delegateBundle,
+          onboarding.transactions.baseSetup,
           onboarding.transactions.initializePrivatePayroll,
         ].filter(Boolean).length;
 
-        toast.info(
-          `Approve ${transactionCount} onboarding transaction${transactionCount === 1 ? "" : "s"} in your wallet`,
-        );
-
-        if (onboarding.transactions.createEmployee) {
-          await signAndSend(
-            onboarding.transactions.createEmployee.transactionBase64,
-            signTransaction,
-            {
-              sendTo: onboarding.transactions.createEmployee.sendTo,
-              signMessage,
-              publicKey,
-            },
+        if (transactionCount === 2) {
+          toast.info("Approve Step 1/2 (base setup), then Step 2/2 (PER init)");
+        } else {
+          toast.info(
+            `Approve ${transactionCount} onboarding transaction${transactionCount === 1 ? "" : "s"} in your wallet`,
           );
         }
 
-        if (onboarding.transactions.createPermission) {
+        if (onboarding.transactions.baseSetup) {
           await signAndSend(
-            onboarding.transactions.createPermission.transactionBase64,
+            onboarding.transactions.baseSetup.transactionBase64,
             signTransaction,
             {
-              sendTo: onboarding.transactions.createPermission.sendTo,
-              signMessage,
-              publicKey,
-            },
-          );
-        }
-
-        if (onboarding.transactions.delegateBundle) {
-          await signAndSend(
-            onboarding.transactions.delegateBundle.transactionBase64,
-            signTransaction,
-            {
-              sendTo: onboarding.transactions.delegateBundle.sendTo,
+              sendTo: onboarding.transactions.baseSetup.sendTo,
               signMessage,
               publicKey,
             },
@@ -2638,7 +2701,7 @@ function EmployerPageContent() {
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
           <Link
-            href={focusedEmployeeId ? "/people" : "/"}
+            href={focusedEmployeeId ? "/people" : "/dashboard"}
             className="inline-flex items-center gap-1.5 text-xs text-[#a8a8aa] hover:text-white transition-colors font-bold uppercase tracking-wider group"
           >
             <ChevronLeft
@@ -2942,7 +3005,7 @@ function EmployerPageContent() {
                       const activeStream =
                         employeeStreamMap.get(employee.id) ?? null;
                       return (
-                        getEffectiveStreamStatus(
+                        resolveStatusWithMissing(
                           activeStream,
                           activeStream
                             ? (privateStates[activeStream.id] ?? null)
@@ -3089,15 +3152,14 @@ function EmployerPageContent() {
                       const hasMissingPrivateState = !!(
                         stream && missingPrivateStates[stream.id]
                       );
-                      const effectiveStatus = getEffectiveStreamStatus(
-                        stream,
-                        preview,
-                      );
+                      const effectiveStatus =
+                        resolveStatusWithMissing(stream, preview) ?? "stopped";
                       const hasStatusMismatch =
                         !!stream &&
                         !!preview &&
                         preview.state.status !== stream.status;
                       const isOnboarded = !!(
+                        !hasMissingPrivateState &&
                         stream?.employeePda &&
                         stream?.privatePayrollPda &&
                         stream?.permissionPda &&
@@ -3283,7 +3345,7 @@ function EmployerPageContent() {
                                       <p className="mt-1 text-[10px] text-[#a8a8aa]">
                                         {payoutModeSummary(
                                           stream.payoutMode ??
-                                            DEFAULT_PAYROLL_PAYOUT_MODE,
+                                          DEFAULT_PAYROLL_PAYOUT_MODE,
                                         )}
                                       </p>
                                     ) : null}
@@ -3390,10 +3452,10 @@ function EmployerPageContent() {
                               ) : hasMissingPrivateState ? (
                                 <div className="bg-red-500/10 border border-red-500/30 px-4 py-4 space-y-3">
                                   <p className="text-[12px] text-red-300 font-bold">
-                                    ⚠ Private state expired
+                                    ⚠ PER state missing
                                   </p>
                                   <p className="text-[11px] text-red-400 leading-relaxed">
-                                    This employee's payroll data on MagicBlock has expired. Follow these steps to fix:
+                                    This stream has no active private state in PER right now. Follow these steps to recover:
                                   </p>
                                   <ol className="text-[11px] text-red-300 font-medium space-y-1.5 list-decimal list-inside">
                                     <li><strong>Save Draft</strong> → re-creates the stream</li>
@@ -3524,7 +3586,7 @@ function EmployerPageContent() {
                               onClick={() =>
                                 effectiveStatus === "stopped"
                                   ? stream &&
-                                    handleRestartStoppedStream(stream)
+                                  handleRestartStoppedStream(stream)
                                   : handleSaveDraftStream(employee)
                               }
                               disabled={
@@ -3536,7 +3598,7 @@ function EmployerPageContent() {
                               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0f0f10] text-white hover:bg-black text-[11px] font-bold transition-all disabled:opacity-50 uppercase tracking-wider border border-white/10"
                             >
                               {savingStream === employee.id ||
-                              restartingStream === stream?.id ? (
+                                restartingStream === stream?.id ? (
                                 <Loader2 size={13} className="animate-spin" />
                               ) : effectiveStatus === "stopped" ? (
                                 <RotateCcw size={13} />

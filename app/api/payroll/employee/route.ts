@@ -88,6 +88,7 @@ type EmployeePayrollStreamSummary = {
       | "tee-token-missing"
       | "stream-not-delegated"
       | "private-account-not-initialized"
+      | "private-state-missing"
       | "preview-unavailable";
   };
   preview: PrivatePayrollPreview | null;
@@ -136,6 +137,17 @@ function mapEmployeeStatusToStreamStatus(status?: number): PayrollStreamStatus {
     default:
       throw new Error(`Unknown private payroll status: ${String(status)}`);
   }
+}
+
+function isMissingPrivateStateError(error: unknown) {
+  const message =
+    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+
+  return (
+    message.includes("private payroll state not found") ||
+    message.includes("private payroll state account is not initialized") ||
+    message.includes("private state expired")
+  );
 }
 
 function decodePrivatePayrollState(
@@ -374,12 +386,25 @@ async function buildStreamSummary(args: {
         source: "per-preview",
         reason: "preview-available",
       };
-    } catch {
+    } catch (error: unknown) {
+      const missingPrivateState = isMissingPrivateStateError(error);
       preview = null;
+      if (missingPrivateState) {
+        resolvedStatus = "stopped";
+        if (resolvedStatus !== stream.status) {
+          await updateStreamStatus({
+            employerWallet: employee.employerWallet,
+            streamId: stream.id,
+            status: resolvedStatus,
+          });
+        }
+      }
       liveState = {
         ready: false,
         source: "stream-metadata",
-        reason: "preview-unavailable",
+        reason: missingPrivateState
+          ? "private-state-missing"
+          : "preview-unavailable",
       };
     }
   }

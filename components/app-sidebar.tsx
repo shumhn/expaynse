@@ -22,6 +22,7 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Logo } from "@/components/landing/Logo";
+import { ConnectWalletBtn } from "./connect-wallet-btn";
 import { getWalletRole, saveWalletRole, type WalletRole } from "@/lib/storage";
 
 type UserRole = WalletRole;
@@ -35,12 +36,10 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: "Home", href: "/dashboard", icon: LayoutDashboard, role: "employer" },
-  { label: "Deposit", href: "/setup", icon: Settings, role: "employer" },
   { label: "Employee", href: "/people", icon: Users, role: "employer" },
   { label: "Dashboard", href: "/claim/dashboard", icon: LayoutDashboard, role: "employee" },
   { label: "Balances", href: "/claim/balances", icon: Wallet, role: "employee" },
   { label: "Withdraw", href: "/claim/withdraw", icon: ArrowUpRight, role: "employee" },
-  { label: "History", href: "/history", icon: History, role: "employer" },
   { label: "Treasury", href: "/treasury", icon: Landmark, role: "employer" },
   { label: "Activity", href: "/activity", icon: Bell, role: "employer" },
 ];
@@ -114,23 +113,22 @@ export function AppSidebar({
 
   const filteredItems = searchQuery.trim()
     ? visibleItems.filter((item) =>
-        item.label.toLowerCase().includes(searchQuery.toLowerCase())
-      )
+      item.label.toLowerCase().includes(searchQuery.toLowerCase())
+    )
     : visibleItems;
 
   return (
     <aside
-      className={`fixed lg:sticky top-0 left-0 z-50 h-screen w-72 bg-[#0a0a0a] border-r border-white/5 flex flex-col transition-transform duration-300 ${
-        mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
-      }`}
+      className={`fixed lg:sticky top-0 left-0 z-50 h-screen w-72 bg-[#0a0a0a] border-r border-white/5 flex flex-col transition-transform duration-300 ${mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+        }`}
     >
       {/* Logo */}
-      <div className="h-16 flex items-center gap-3 px-5 border-b border-white/5">
-        <Logo className="w-9 h-9" />
+      <Link href="/" className="h-16 flex items-center gap-3 px-5 border-b border-white/5 no-underline group">
+        <Logo className="w-9 h-9 transition-transform group-hover:scale-110" />
         <span className="text-lg font-bold text-white tracking-tight">
           expaynse
         </span>
-      </div>
+      </Link>
 
       <div className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
         {/* Workspace Tag */}
@@ -165,18 +163,17 @@ export function AppSidebar({
         <div className="space-y-0.5">
           {filteredItems.map((item) => {
             const isActive = pathname === item.href || (item.href !== "/" && pathname?.startsWith(`${item.href}/`));
-              
+
             const Icon = item.icon;
             return (
               <Link
                 key={item.href}
                 href={item.href}
                 onClick={onClose}
-                className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-semibold transition-all no-underline ${
-                  isActive
-                    ? "bg-[#1eba98]/10 text-[#1eba98] border border-[#1eba98]/20 shadow-xs"
-                    : "text-[#a8a8aa] hover:text-white hover:bg-white/5"
-                }`}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-semibold transition-all no-underline ${isActive
+                  ? "bg-[#1eba98]/10 text-[#1eba98] border border-[#1eba98]/20 shadow-xs"
+                  : "text-[#a8a8aa] hover:text-white hover:bg-white/5"
+                  }`}
               >
                 <Icon
                   size={18}
@@ -214,13 +211,7 @@ export function AppSidebar({
             </button>
           </div>
         ) : (
-          <Link
-            href="/"
-            className="flex items-center justify-center gap-2 w-full py-3 bg-[#1eba98] hover:bg-[#1eba98]/80 text-black text-sm font-semibold rounded-xl transition-all shadow-sm hover:shadow-md no-underline"
-          >
-            <Wallet size={16} />
-            Select Wallet
-          </Link>
+          <ConnectWalletBtn mode="standalone" className="w-full" />
         )}
       </div>
     </aside>

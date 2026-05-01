@@ -68,9 +68,7 @@ type OnboardBuildResponse = {
   permissionPda: string;
   alreadyOnboarded?: boolean;
   transactions: {
-    createEmployee?: SendSpec;
-    createPermission?: SendSpec;
-    delegateBundle?: SendSpec;
+    baseSetup?: SendSpec;
     initializePrivatePayroll?: SendSpec;
   };
 };
@@ -832,25 +830,11 @@ async function main() {
     onboardBuildJson.error || "Onboarding build missing PDAs"
   );
 
-  if (onboardBuildJson.transactions.createEmployee) {
+  if (onboardBuildJson.transactions.baseSetup) {
     await sendBuiltTransaction({
-      spec: onboardBuildJson.transactions.createEmployee,
+      spec: onboardBuildJson.transactions.baseSetup,
       signer: authority,
-      signerLabel: "onboard:createEmployee",
-    });
-  }
-  if (onboardBuildJson.transactions.createPermission) {
-    await sendBuiltTransaction({
-      spec: onboardBuildJson.transactions.createPermission,
-      signer: authority,
-      signerLabel: "onboard:createPermission",
-    });
-  }
-  if (onboardBuildJson.transactions.delegateBundle) {
-    await sendBuiltTransaction({
-      spec: onboardBuildJson.transactions.delegateBundle,
-      signer: authority,
-      signerLabel: "onboard:delegateBundle",
+      signerLabel: "onboard:baseSetup",
     });
     console.log("Waiting for delegation to settle...");
     await sleep(5000);

@@ -61,9 +61,10 @@ export function getLiveStateCopy(liveState: EmployeePayrollSummaryResponse["stre
   if (!liveState || liveState.ready) return "Live private accrual based on your stream rate and the latest TEE timestamp.";
   switch (liveState.reason) {
     case "private-account-not-initialized": return "Your private payroll account is not initialized yet. Complete the one-time setup below to receive private salary and unlock live PER payroll visibility.";
+    case "private-state-missing": return "Private payroll state is missing/expired in PER for this stream. Ask employer to re-onboard the stream and sync again.";
     case "stream-not-delegated": return "Your employer has not finished PER onboarding for this stream yet. Live private payroll data will appear here once delegation completes.";
     case "tee-token-missing": return "Live private payroll needs an authenticated TEE session. Refresh payroll and approve the message prompt to load live PER state.";
-    case "preview-unavailable": return "Private payroll preview is temporarily unavailable. PER state may still be syncing, or this stream may still be finishing setup.";
+    case "preview-unavailable": return "Live PER preview is unavailable right now. UI values stay locked until a signed refresh fetches current on-chain private state.";
     default: return "Live private accrual based on your stream rate and the latest TEE timestamp.";
   }
 }
