@@ -2815,6 +2815,11 @@ function EmployerPageContent() {
             );
             return;
           }
+
+          toast.info(
+            "Stopped streams cannot be settled with the current payroll instruction. Resume first if you need to settle more payroll.",
+          );
+          return;
         }
 
         const tickBuildResponse = await walletAuthenticatedFetch({
@@ -4332,8 +4337,7 @@ function EmployerPageContent() {
                                     settlingTickStream !== null ||
                                     !isOnboarded ||
                                     !isRecipientPrivateReady ||
-                                    (effectiveStatus === "stopped" &&
-                                      hasMissingPrivateState)
+                                    effectiveStatus === "stopped"
                                   }
                                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0f0f10] border border-white/10 text-white hover:bg-black text-[11px] font-bold transition-all disabled:opacity-60 shadow-sm uppercase tracking-wider"
                                 >
@@ -4361,7 +4365,7 @@ function EmployerPageContent() {
                                         hasMissingPrivateState
                                         ? "No PER State"
                                         : effectiveStatus === "stopped"
-                                          ? "Settle Remaining"
+                                          ? "Stopped"
                                           : "Settle All"}
                                 </button>
                               </>

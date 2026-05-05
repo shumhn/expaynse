@@ -28,7 +28,6 @@ import { SetupCompanyModal } from "@/components/setup-company-modal";
 import {
   fetchTeeAuthToken,
   getBalance,
-  getPrivateBalance,
   isJwtExpired,
   type BalanceResponse,
 } from "@/lib/magicblock-api";
@@ -197,7 +196,8 @@ export default function DashboardPage() {
         setBaseBalance(parseInt(baseBalRes.balance ?? "0", 10) / 1_000_000);
       }
 
-      // For the vault/private balance: use treasury if company exists, else personal
+      // This card is treasury-only. If no company exists yet, do not fall back
+      // to the connected wallet's personal private balance.
       const currentCompany = companyRef.current;
       if (currentCompany?.id) {
         if (!signMessage) return;
@@ -211,11 +211,7 @@ export default function DashboardPage() {
           setVaultBalance(parseInt(data.balance ?? "0", 10) / 1_000_000);
         }
       } else {
-        const teeToken = await getOrFetchToken();
-        const privBalRes = await getPrivateBalance(walletAddr, teeToken).catch(() => null);
-        if (privBalRes) {
-          setVaultBalance(parseInt(privBalRes.balance ?? "0", 10) / 1_000_000);
-        }
+        setVaultBalance(0);
       }
     } catch {
       // Balance fetch failed silently
