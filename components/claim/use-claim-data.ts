@@ -24,6 +24,12 @@ export interface EmployeePrivateInitStatusResponse {
   employeeWallet: string;
   registered: boolean;
   initialized: boolean;
+  status?: "pending" | "processing" | "confirmed" | "failed";
+  requestedAt?: string | null;
+  lastAttemptAt?: string | null;
+  confirmedAt?: string | null;
+  txSignature?: string | null;
+  error?: string | null;
   message: string;
 }
 
@@ -113,8 +119,10 @@ export function useClaimData() {
   const [privateAccountInitialized, setPrivateAccountInitialized] = useState(false);
   const [checkingPrivateInitStatus, setCheckingPrivateInitStatus] = useState(false);
   const [registeredEmployeeWallet, setRegisteredEmployeeWallet] = useState(false);
+  const [privateInitStatus, setPrivateInitStatus] = useState<EmployeePrivateInitStatusResponse["status"]>("pending");
+  const [privateInitError, setPrivateInitError] = useState<string | null>(null);
+  const [privateInitMessage, setPrivateInitMessage] = useState<string | null>(null);
   const [withdrawing, setWithdrawing] = useState(false);
-  const [animatedNowMs, setAnimatedNowMs] = useState(() => Date.now());
   const [magicBlockHealth, setMagicBlockHealth] = useState<MagicBlockHealthState>("checking");
 
   const tokenCache = useRef<string | null>(null);
@@ -147,7 +155,9 @@ export function useClaimData() {
     setPayrollSummaryError(null);
     setPrivateAccountInitialized(false);
     setRegisteredEmployeeWallet(false);
-    setAnimatedNowMs(Date.now());
+    setPrivateInitStatus("pending");
+    setPrivateInitError(null);
+    setPrivateInitMessage(null);
   }, [publicKey]);
 
   const getOrFetchToken = useCallback(
@@ -183,10 +193,15 @@ export function useClaimData() {
       if (!options?.silent) setCheckingPrivateInitStatus(true);
       try {
         const response = await fetch(`/api/employee-private-init?employeeWallet=${publicKey.toBase58()}`);
-        const json = await response.json();
+        const json = (await response.json()) as EmployeePrivateInitStatusResponse & {
+          error?: string;
+        };
         if (!response.ok) throw new Error(json.error || "Failed to load private account status");
         setRegisteredEmployeeWallet(json.registered);
         setPrivateAccountInitialized(json.initialized);
+        setPrivateInitStatus(json.status ?? (json.initialized ? "confirmed" : "pending"));
+        setPrivateInitError(json.error ?? null);
+        setPrivateInitMessage(json.message ?? null);
         return json.initialized;
       } catch (err: any) {
         if (!options?.silent) toast.error(`Private account status failed: ${err.message}`);
@@ -209,7 +224,7 @@ export function useClaimData() {
         if (!token) return;
         const res = (await getPrivateBalance(publicKey.toBase58(), token)) as BalanceResponse;
         if (res.location !== "ephemeral") throw new Error(`Expected ephemeral balance, got ${res.location}`);
-        const normalized = (parseInt(res.balance ?? "0", 10) / 1_000_000).toFixed(2);
+        const normalized = parseFloat((parseInt(res.balance ?? "0", 10) / 1_000_000).toFixed(6)).toString();
         setPrivBalance(normalized);
         if (!options?.silent) toast.success(`Current private balance: ${normalized} USDC`);
       } catch (err: any) {
@@ -278,12 +293,13 @@ export function useClaimData() {
     privateAccountInitialized,
     checkingPrivateInitStatus,
     registeredEmployeeWallet,
+    privateInitStatus,
+    privateInitError,
+    privateInitMessage,
     withdrawing,
-    animatedNowMs,
     magicBlockHealth,
     setInitializingPrivateAccount,
     setWithdrawing,
-    setAnimatedNowMs,
     setMagicBlockHealth,
     fetchPrivateInitStatus,
     fetchPrivateBalance,

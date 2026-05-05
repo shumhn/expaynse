@@ -18,20 +18,21 @@ import {
   getStatusMeta,
   getLiveStateCopy,
   microToUsdc,
-  computeAnimatedClaimableAmountMicro,
 } from "@/components/claim/claim-utils";
 
 export default function ClaimDashboardPage() {
   const {
     publicKey,
+    privBalance,
     payrollSummary,
     payrollSummaryError,
     loadingPayrollSummary,
     magicBlockHealth,
     fetchEmployeePayrollSummary,
     fetchPrivateInitStatus,
-    animatedNowMs,
-    setAnimatedNowMs,
+    fetchPrivateBalance,
+    privateAccountInitialized,
+    registeredEmployeeWallet,
   } = useClaimData();
 
   const cycleInfo = useMemo(() => getCurrentCycleSnapshot(), []);
@@ -39,40 +40,30 @@ export default function ClaimDashboardPage() {
   useEffect(() => {
     if (publicKey) {
       void fetchPrivateInitStatus({ silent: true });
+      void fetchPrivateBalance({ silent: true, interactive: true });
       void fetchEmployeePayrollSummary({ silent: false });
     }
-  }, [publicKey, fetchPrivateInitStatus, fetchEmployeePayrollSummary]);
-
-  useEffect(() => {
-    if (!publicKey) return;
-    const poll = setInterval(() => {
-      void fetchEmployeePayrollSummary({ silent: true, interactive: false });
-    }, 5000);
-    return () => clearInterval(poll);
-  }, [publicKey, fetchEmployeePayrollSummary]);
-
-  useEffect(() => {
-    const timer = setInterval(() => setAnimatedNowMs(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [setAnimatedNowMs]);
+  }, [publicKey, fetchPrivateInitStatus, fetchPrivateBalance, fetchEmployeePayrollSummary]);
 
   const primaryPayrollStream = payrollSummary?.streams?.[0];
   const statusMeta = primaryPayrollStream ? getStatusMeta(primaryPayrollStream.stream.status) : null;
   const StatusIcon = statusMeta?.icon;
   const hasLivePreview = Boolean(primaryPayrollStream?.preview && primaryPayrollStream?.liveState?.ready);
+  useEffect(() => {
+    if (!publicKey) return;
+    const poll = setInterval(() => {
+      void fetchPrivateBalance({ silent: true });
+      void fetchEmployeePayrollSummary({ silent: true, interactive: false });
+    }, hasLivePreview ? 1000 : 5000);
+    return () => clearInterval(poll);
+  }, [publicKey, fetchPrivateBalance, fetchEmployeePayrollSummary, hasLivePreview]);
 
-  const animatedClaimableAmountMicro = computeAnimatedClaimableAmountMicro({
-    preview: primaryPayrollStream?.preview,
-    liveState: primaryPayrollStream?.liveState ?? {
-      ready: false,
-      source: "per-preview",
-      reason: "preview-unavailable",
-    },
-    syncedAt: payrollSummary?.syncedAt,
-    nowMs: animatedNowMs,
-  });
+  const exactClaimableAmountMicro =
+    hasLivePreview && primaryPayrollStream?.preview
+      ? primaryPayrollStream.preview.effectiveClaimableAmountMicro
+      : null;
   const monthlySalaryAmount = primaryPayrollStream?.preview?.monthlyCapUsd ?? null;
-  const claimableNowAmount = hasLivePreview ? microToUsdc(animatedClaimableAmountMicro) : null;
+  const claimableNowAmount = hasLivePreview ? microToUsdc(exactClaimableAmountMicro) : null;
   const paidThisCycleAmount = hasLivePreview ? microToUsdc(primaryPayrollStream?.preview?.paidThisCycleMicro) : null;
   const earnedThisMonthAmount =
     claimableNowAmount !== null && paidThisCycleAmount !== null
@@ -94,6 +85,54 @@ export default function ClaimDashboardPage() {
   const nextReleaseLabel = hasLivePreview
     ? "Auto-accruing in real-time"
     : "Sign + refresh to load live PER state";
+  const privateBalanceAmount = Number.parseFloat(privBalance ?? "0");
+  const employeeExperienceState = !registeredEmployeeWallet
+    ? "not_registered"
+    : !privateAccountInitialized
+      ? "needs_private_init"
+      : privateBalanceAmount > 0
+        ? "balance_available"
+        : hasLivePreview
+          ? "ready_to_claim"
+          : "waiting_for_employer";
+
+  const employeeExperienceCopy = {
+    not_registered: {
+      eyebrow: "Step 1",
+      title: "This wallet is not on payroll yet",
+      body: "Ask your employer to add this wallet to your payroll roster before you try to claim salary.",
+      ctaHref: "/claim/withdraw",
+      ctaLabel: "Open Claim Center",
+    },
+    needs_private_init: {
+      eyebrow: "Step 2",
+      title: "Set up your private account once",
+      body: "Your employer has added you, but your private receiving account still needs a one-time setup before salary can arrive.",
+      ctaHref: "/claim/withdraw",
+      ctaLabel: "Set Up Private Account",
+    },
+    waiting_for_employer: {
+      eyebrow: "Step 3",
+      title: "Waiting for payroll activation",
+      body: "Your private account is ready. Your employer still needs to finish payroll setup before new salary becomes claimable.",
+      ctaHref: "/claim/balances",
+      ctaLabel: "Check Payroll Status",
+    },
+    ready_to_claim: {
+      eyebrow: "Step 4",
+      title: "Salary is ready to claim",
+      body: "Your payroll stream is live. Claim any available salary into your private balance, then withdraw whenever you want.",
+      ctaHref: "/claim/withdraw",
+      ctaLabel: "Claim Salary",
+    },
+    balance_available: {
+      eyebrow: "Step 5",
+      title: "You have funds in your private balance",
+      body: "Your salary has already landed privately. You can withdraw it to your wallet now or keep it private for later.",
+      ctaHref: "/claim/withdraw",
+      ctaLabel: "Withdraw Funds",
+    },
+  }[employeeExperienceState];
 
   return (
     <EmployerLayout>
@@ -140,26 +179,26 @@ export default function ClaimDashboardPage() {
                 {primaryPayrollStream && statusMeta ? statusMeta.copy : "See whether your payroll is live, how much has accrued privately, and what is already available in your vault."}
               </p>
 
-              <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
+	              <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
                 <ShieldCheck size={14} className={magicBlockHealth === "ok" ? "text-[#1eba98]" : magicBlockHealth === "error" ? "text-amber-300" : "text-[#8f8f95]"} />
                 <span className={`text-[9px] font-bold uppercase tracking-[0.15em] ${magicBlockHealth === "ok" ? "text-[#1eba98]" : magicBlockHealth === "error" ? "text-amber-300" : "text-[#8f8f95]"}`}>
                   MagicBlock Payments {magicBlockHealth === "ok" ? "Online" : magicBlockHealth === "error" ? "Degraded" : "Checking"}
                 </span>
               </div>
-              {primaryPayrollStream && hasLivePreview ? (
+	              {primaryPayrollStream && hasLivePreview ? (
                 <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-[#1eba98]/25 bg-[#1eba98]/10 px-3 py-1.5">
                   <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">
                     Live PER Synced
                   </span>
                 </div>
-              ) : null}
-            </div>
+	              ) : null}
+	            </div>
 
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-              <Link href="/claim/withdraw" className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-[#1eba98]/40 bg-[#1eba98]/15 px-4 text-[10px] font-bold uppercase tracking-wider text-[#1eba98] transition-all hover:bg-[#1eba98]/25 no-underline">
-                <LogOut size={14} />
-                Claim Actions
-              </Link>
+	            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+	              <Link href={employeeExperienceCopy.ctaHref} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-[#1eba98]/40 bg-[#1eba98]/15 px-4 text-[10px] font-bold uppercase tracking-wider text-[#1eba98] transition-all hover:bg-[#1eba98]/25 no-underline">
+	                <LogOut size={14} />
+	                {employeeExperienceCopy.ctaLabel}
+	              </Link>
               <button
                 onClick={() => void fetchEmployeePayrollSummary({ force: true })}
                 disabled={loadingPayrollSummary}
@@ -178,9 +217,29 @@ export default function ClaimDashboardPage() {
             </div>
           ) : null}
 
-          {primaryPayrollStream ? (
-            <>
-              <div className="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+	          {primaryPayrollStream ? (
+	            <>
+	              <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-5">
+	                <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">
+	                  {employeeExperienceCopy.eyebrow}
+	                </p>
+	                <div className="mt-3 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+	                  <div>
+	                    <h3 className="text-lg font-bold text-white">{employeeExperienceCopy.title}</h3>
+	                    <p className="mt-1 text-sm leading-relaxed text-[#a8a8aa]">
+	                      {employeeExperienceCopy.body}
+	                    </p>
+	                  </div>
+	                  <Link
+	                    href={employeeExperienceCopy.ctaHref}
+	                    className="inline-flex h-11 items-center justify-center rounded-xl bg-[#1eba98] px-4 text-[10px] font-bold uppercase tracking-wider text-black transition-all hover:bg-[#18a786] no-underline"
+	                  >
+	                    {employeeExperienceCopy.ctaLabel}
+	                  </Link>
+	                </div>
+	              </div>
+
+	              <div className="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="rounded-2xl border border-[#1eba98]/35 bg-[#1eba98]/10 p-6">
                   <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">Your {cycleInfo.label} Salary</p>
                   <p className="mt-2 text-3xl font-bold tracking-tight text-white">
