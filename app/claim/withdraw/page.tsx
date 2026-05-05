@@ -19,7 +19,12 @@ import { useClaimData } from "@/components/claim/use-claim-data";
 import { toast } from "sonner";
 import { PublicKey } from "@solana/web3.js";
 import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
-import { getBalance, privateTransfer, signAndSend, withdraw } from "@/lib/magicblock-api";
+import {
+  getBalance,
+  getPrivateBalance,
+  privateTransfer,
+  signAndSend,
+} from "@/lib/magicblock-api";
 
 export default function ClaimWithdrawPage() {
   const {
@@ -42,8 +47,10 @@ export default function ClaimWithdrawPage() {
     fetchEmployeePayrollSummary,
     getOrFetchToken,
   } = useClaimData();
+  const [visiblePrivBalance, setVisiblePrivBalance] = useState<string | null>(null);
   const [withdrawAmount, setWithdrawAmount] = useState<string>("");
   const [withdrawRecipient, setWithdrawRecipient] = useState<string>("");
+  const [withdrawSyncNotice, setWithdrawSyncNotice] = useState<string>("");
   const [requestAmount, setRequestAmount] = useState<string>("");
   const [requestMode, setRequestMode] = useState<"base" | "ephemeral">("base");
   const [requestDestination, setRequestDestination] = useState<string>("");
@@ -114,7 +121,12 @@ export default function ClaimWithdrawPage() {
     return "Unknown error";
   };
 
-  const privBalanceNum = parseFloat(privBalance ?? "0");
+  useEffect(() => {
+    setVisiblePrivBalance(privBalance);
+  }, [privBalance]);
+
+  const effectivePrivBalance = visiblePrivBalance ?? privBalance ?? "0";
+  const privBalanceNum = parseFloat(effectivePrivBalance);
   const primaryPayrollStream = payrollSummary?.streams?.[0];
   const hasLivePreview = Boolean(
     primaryPayrollStream?.preview && primaryPayrollStream?.liveState?.ready,
@@ -318,6 +330,24 @@ export default function ClaimWithdrawPage() {
     return !isNaN(val) && val > 0 && val <= privBalanceNum;
   })();
 
+  useEffect(() => {
+    if (withdrawAmount.trim() === "") {
+      if (withdrawSyncNotice) setWithdrawSyncNotice("");
+      return;
+    }
+    const parsedAmount = parseFloat(withdrawAmount);
+    if (Number.isNaN(parsedAmount) || parsedAmount <= privBalanceNum) {
+      if (withdrawSyncNotice) setWithdrawSyncNotice("");
+      return;
+    }
+    setWithdrawAmount(privBalanceNum > 0 ? privBalanceNum.toFixed(6) : "");
+    setWithdrawSyncNotice(
+      privBalanceNum > 0
+        ? `Balance refreshed. Latest withdrawable amount is ${privBalanceNum.toFixed(6)} USDC.`
+        : "Balance refreshed. Your private balance is now empty.",
+    );
+  }, [privBalanceNum, withdrawAmount, withdrawSyncNotice]);
+
   const isOwnWalletDestination = useMemo(() => {
     if (!publicKey || !isValidWithdrawRecipient) return false;
     return withdrawRecipientTrimmed === publicKey.toBase58();
@@ -328,41 +358,64 @@ export default function ClaimWithdrawPage() {
     setWithdrawing(true);
     const withdrawToastId = "employee-withdraw-toast";
     toast.loading("Preparing withdrawal...", { id: withdrawToastId });
+    let activeToken: string | null = null;
     try {
-      const token = await getOrFetchToken();
-      if (!token) throw new Error("Authentication failed");
+      activeToken = await getOrFetchToken();
+      if (!activeToken) throw new Error("Authentication failed");
 
       const amountToWithdraw =
         withdrawAmount.trim() === ""
           ? privBalanceNum
           : parseFloat(withdrawAmount);
+      const latestPrivateBalance = await getPrivateBalance(
+        publicKey.toBase58(),
+        activeToken,
+      );
+      const latestPrivateBalanceMicro =
+        parseInt(latestPrivateBalance.balance ?? "0", 10) || 0;
+      const latestPrivateBalanceUi =
+        latestPrivateBalanceMicro > 0
+          ? (latestPrivateBalanceMicro / 1_000_000).toFixed(6)
+          : "0";
+      setVisiblePrivBalance(latestPrivateBalanceUi);
+      const amountToWithdrawMicro = Math.round(amountToWithdraw * 1_000_000);
+
+      if (amountToWithdrawMicro <= 0) {
+        throw new Error("Enter a valid withdrawal amount.");
+      }
+
+      if (latestPrivateBalanceMicro < amountToWithdrawMicro) {
+        setWithdrawAmount(
+          latestPrivateBalanceMicro > 0 ? latestPrivateBalanceUi : "",
+        );
+        setWithdrawSyncNotice(
+          latestPrivateBalanceMicro > 0
+            ? `Balance refreshed. Latest withdrawable amount is ${latestPrivateBalanceUi} USDC.`
+            : "Balance refreshed. Your private balance is now empty.",
+        );
+        void fetchPrivateBalance({ silent: true });
+        throw new Error(
+          latestPrivateBalanceMicro === 0
+            ? "Your private balance is already empty. Refresh completed state and try again."
+            : `Private balance changed. Latest available balance is ${latestPrivateBalanceUi} USDC.`,
+        );
+      }
+
       const expectedAmountMicro = Math.round(amountToWithdraw * 1_000_000);
       const baseBalanceBefore = isOwnWalletDestination
         ? await getBalance(publicKey.toBase58()).catch(() => null)
         : null;
-      let buildRes;
-      if (isOwnWalletDestination) {
-        // Use the dedicated withdraw builder for private -> base exits.
-        // This keeps the wallet signing path aligned with the PER withdraw flow
-        // instead of building a generic private transfer.
-        buildRes = await withdraw(
-          publicKey.toBase58(),
-          amountToWithdraw,
-          token,
-        );
-      } else {
-        buildRes = await privateTransfer(
-          publicKey.toBase58(),
-          withdrawRecipientTrimmed,
-          amountToWithdraw,
-          undefined,
-          token,
-          {
-            fromBalance: "ephemeral",
-            toBalance: "base",
-          },
-        );
-      }
+      const buildRes = await privateTransfer(
+        publicKey.toBase58(),
+        withdrawRecipientTrimmed,
+        amountToWithdraw,
+        undefined,
+        activeToken,
+        {
+          fromBalance: "ephemeral",
+          toBalance: "base",
+        },
+      );
 
       if (!buildRes.transactionBase64) {
         throw new Error("API did not return a transaction");
@@ -439,6 +492,7 @@ export default function ClaimWithdrawPage() {
         }
       }
       setWithdrawAmount("");
+      setWithdrawSyncNotice("");
       void fetchPrivateBalance({ silent: true });
       void fetchEmployeePayrollSummary({
         silent: true,
@@ -447,7 +501,38 @@ export default function ClaimWithdrawPage() {
       });
       void fetchWithdrawHistory(true);
     } catch (err: unknown) {
-      const message = getErrorMessage(err);
+      const rawMessage = getErrorMessage(err);
+      const isPriorCreditError =
+        rawMessage.includes(
+          "Attempt to debit an account but found no record of a prior credit",
+        ) ||
+        rawMessage.toLowerCase().includes("prior credit");
+
+      if (isPriorCreditError) {
+        setWithdrawSyncNotice(
+          "Your private balance changed while the transaction was being prepared. The UI is refreshing to the latest available amount.",
+        );
+        if (activeToken && publicKey) {
+          void getPrivateBalance(publicKey.toBase58(), activeToken)
+            .then((balance) => {
+              const latestMicro = parseInt(balance.balance ?? "0", 10) || 0;
+              setVisiblePrivBalance(
+                latestMicro > 0 ? (latestMicro / 1_000_000).toFixed(6) : "0",
+              );
+            })
+            .catch(() => undefined);
+        }
+        void fetchPrivateBalance({ silent: true });
+        void fetchEmployeePayrollSummary({
+          silent: true,
+          force: true,
+          interactive: false,
+        });
+      }
+
+      const message = isPriorCreditError
+        ? "Your private balance is no longer available for this withdrawal. The UI has been refreshed with the latest state."
+        : rawMessage;
       toast.error(`Transaction failed: ${message}`, { id: withdrawToastId });
       if (publicKey && signMessage) {
         try {
@@ -877,7 +962,10 @@ export default function ClaimWithdrawPage() {
                       type="number"
                       placeholder={`Max ${privBalanceNum.toString()}`}
                       value={withdrawAmount}
-                      onChange={(e) => setWithdrawAmount(e.target.value)}
+                      onChange={(e) => {
+                        setWithdrawAmount(e.target.value);
+                        if (withdrawSyncNotice) setWithdrawSyncNotice("");
+                      }}
                       disabled={!privateAccountInitialized}
                       className="flex-1 bg-transparent text-lg font-bold text-white outline-none placeholder:text-[#62626b]"
                     />
@@ -903,6 +991,11 @@ export default function ClaimWithdrawPage() {
                         Insufficient private balance
                       </p>
                     )}
+                  {withdrawSyncNotice && (
+                    <p className="mt-2 px-1 text-[10px] font-bold text-amber-200">
+                      {withdrawSyncNotice}
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex flex-col gap-4 pt-4 sm:flex-row">
