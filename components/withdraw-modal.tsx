@@ -2,11 +2,12 @@ import { useState, useEffect } from "react";
 import { Loader2, X, Wallet, CheckCircle2, ExternalLink, ShieldCheck } from "lucide-react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { withdraw, signAndSend, checkHealth } from "@/lib/magicblock-api";
+import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
 import { toast } from "sonner";
 import Link from "next/link";
 
-export function WithdrawModal({ isOpen, onClose, baseBalance = 0, privateBalance = 0, onWithdrawSuccess }: { isOpen: boolean; onClose: () => void; baseBalance?: number; privateBalance?: number; onWithdrawSuccess?: () => void; }) {
-  const { publicKey, signTransaction } = useWallet();
+export function WithdrawModal({ isOpen, onClose, baseBalance = 0, privateBalance = 0, treasuryPubkey, companyId, onWithdrawSuccess }: { isOpen: boolean; onClose: () => void; baseBalance?: number; privateBalance?: number; treasuryPubkey?: string; companyId?: string; onWithdrawSuccess?: () => void; }) {
+  const { publicKey, signTransaction, signMessage } = useWallet();
   const [amount, setAmount] = useState("");
   const [loading, setLoading] = useState(false);
   const [successSig, setSuccessSig] = useState<string | null>(null);
@@ -37,7 +38,7 @@ export function WithdrawModal({ isOpen, onClose, baseBalance = 0, privateBalance
   };
 
   const handleWithdraw = async () => {
-    if (!publicKey || !signTransaction) {
+    if (!publicKey) {
       toast.error("Wallet not connected");
       return;
     }
@@ -47,26 +48,52 @@ export function WithdrawModal({ isOpen, onClose, baseBalance = 0, privateBalance
       return;
     }
     if (val > privateBalance) {
-      toast.error("Insufficient private vault balance");
+      toast.error(`Insufficient ${companyId ? "treasury" : "private vault"} balance`);
       return;
     }
 
     setLoading(true);
     try {
-      // Create withdraw transaction using MagicBlock
-      const buildRes = await withdraw(
-        publicKey.toBase58(),
-        val,
-      );
+      let sig: string;
 
-      if (!buildRes || !buildRes.transactionBase64) {
-        throw new Error("Failed to build withdraw transaction");
+      if (companyId) {
+        // Withdraw from Company Treasury (requires backend to sign with treasury key)
+        if (!signMessage) throw new Error("Wallet does not support message signing");
+        const res = await walletAuthenticatedFetch({
+          path: `/api/company/${companyId}/withdraw?wallet=${publicKey.toBase58()}`,
+          method: "POST",
+          signMessage,
+          wallet: publicKey.toBase58(),
+          body: {
+            amount: val,
+            destinationAddress: publicKey.toBase58()
+          }
+        });
+        
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || "Failed to withdraw from treasury");
+        }
+        
+        const data = await res.json();
+        sig = data.signature;
+      } else {
+        // Withdraw from Personal Ephemeral Vault (frontend signs)
+        if (!signTransaction) throw new Error("Wallet does not support transaction signing");
+        const buildRes = await withdraw(
+          publicKey.toBase58(),
+          val,
+        );
+
+        if (!buildRes || !buildRes.transactionBase64) {
+          throw new Error("Failed to build withdraw transaction");
+        }
+
+        sig = await signAndSend(
+          buildRes.transactionBase64,
+          signTransaction
+        );
       }
-
-      const sig = await signAndSend(
-        buildRes.transactionBase64,
-        signTransaction
-      );
 
       if (sig) {
         setSuccessSig(sig);
@@ -113,7 +140,7 @@ export function WithdrawModal({ isOpen, onClose, baseBalance = 0, privateBalance
               </p>
               
               <Link 
-                href={`https://explorer.solana.com/tx/${successSig}?cluster=devnet`}
+                href={`https://solscan.io/tx/${successSig}?cluster=devnet`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-2 text-xs font-bold text-[#1eba98] hover:text-[#1eba98]/80 transition-colors uppercase tracking-wider bg-[#1eba98]/10 px-4 py-2 rounded-xl"
@@ -132,7 +159,7 @@ export function WithdrawModal({ isOpen, onClose, baseBalance = 0, privateBalance
             <div className="space-y-6">
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-white/5 border border-white/10 rounded-2xl p-4 cursor-pointer hover:bg-white/10 transition-colors" onClick={() => setAmount(privateBalance.toString())}>
-                  <p className="text-[10px] uppercase tracking-wider font-bold text-[#8f8f95] mb-1">Private Vault</p>
+                  <p className="text-[10px] uppercase tracking-wider font-bold text-[#8f8f95] mb-1">{companyId ? "Treasury Vault" : "Private Vault"}</p>
                   <p className="text-lg font-bold text-white tracking-tight">{privateBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-sm text-[#8f8f95]">USDC</span></p>
                 </div>
                 <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
@@ -170,7 +197,9 @@ export function WithdrawModal({ isOpen, onClose, baseBalance = 0, privateBalance
               <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 flex items-start gap-3">
                 <ShieldCheck size={20} className="text-amber-500 shrink-0 mt-0.5" />
                 <p className="text-xs text-amber-500/80 leading-relaxed font-medium">
-                  Withdrawing funds will move them out of your private enclave. They will become visible on the public Solana ledger.
+                  {companyId 
+                    ? "Withdrawing funds will move them out of your company treasury enclave. They will become visible on the public Solana ledger in your base wallet."
+                    : "Withdrawing funds will move them out of your private enclave. They will become visible on the public Solana ledger in your base wallet."}
                 </p>
               </div>
 

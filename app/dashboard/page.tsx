@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   Download,
   Plus,
+  Building2,
 } from "lucide-react";
 
 import Link from "next/link";
@@ -23,6 +24,7 @@ import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
 import { RunwayProjectionChart } from "@/components/ui/payroll-chart";
 import { CompensationBreakdownChart } from "@/components/ui/crypto-distribution-chart";
 import { DepositModal } from "@/components/deposit-modal";
+import { SetupCompanyModal } from "@/components/setup-company-modal";
 import {
   fetchTeeAuthToken,
   getBalance,
@@ -152,6 +154,11 @@ export default function DashboardPage() {
   const [vaultBalance, setVaultBalance] = useState<number>(0);
   const [baseBalance, setBaseBalance] = useState<number>(0);
   const [depositOpen, setDepositOpen] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [company, setCompany] = useState<{ id: string; name: string; treasuryPubkey: string } | null>(null);
+
+  const companyRef = useRef(company);
+  companyRef.current = company;
 
   const tokenCache = useRef<string | null>(null);
 
@@ -184,18 +191,31 @@ export default function DashboardPage() {
   const refreshVaultBalance = useCallback(async () => {
     if (!walletAddr) return;
     try {
-      const teeToken = await getOrFetchToken();
-      
-      const [privBalRes, baseBalRes] = await Promise.all([
-        getPrivateBalance(walletAddr, teeToken).catch(() => null),
-        getBalance(walletAddr).catch(() => null)
-      ]);
-
-      if (privBalRes) {
-        setVaultBalance(parseInt(privBalRes.balance ?? "0", 10) / 1_000_000);
-      }
+      // Always fetch the employer's base balance
+      const baseBalRes = await getBalance(walletAddr).catch(() => null);
       if (baseBalRes) {
         setBaseBalance(parseInt(baseBalRes.balance ?? "0", 10) / 1_000_000);
+      }
+
+      // For the vault/private balance: use treasury if company exists, else personal
+      const currentCompany = companyRef.current;
+      if (currentCompany?.id) {
+        if (!signMessage) return;
+        const treasuryRes = await walletAuthenticatedFetch({
+          wallet: walletAddr,
+          signMessage,
+          path: `/api/company/${currentCompany.id}/balance?wallet=${walletAddr}`,
+        }).catch(() => null);
+        if (treasuryRes && treasuryRes.ok) {
+          const data = await treasuryRes.json();
+          setVaultBalance(parseInt(data.balance ?? "0", 10) / 1_000_000);
+        }
+      } else {
+        const teeToken = await getOrFetchToken();
+        const privBalRes = await getPrivateBalance(walletAddr, teeToken).catch(() => null);
+        if (privBalRes) {
+          setVaultBalance(parseInt(privBalRes.balance ?? "0", 10) / 1_000_000);
+        }
       }
     } catch {
       // Balance fetch failed silently
@@ -207,12 +227,13 @@ export default function DashboardPage() {
       setRuns([]);
       setCycles([]);
       setEmployeeProfiles([]);
+      setCompany(null);
       return;
     }
 
     setLoading(true);
     try {
-      const [runsRes, cyclesRes, profilesRes, empRes, strRes] = await Promise.all([
+      const [runsRes, cyclesRes, profilesRes, empRes, strRes, compRes] = await Promise.all([
         walletAuthenticatedFetch({
           wallet: walletAddr,
           signMessage,
@@ -237,6 +258,11 @@ export default function DashboardPage() {
           wallet: walletAddr,
           signMessage,
           path: `/api/streams?employerWallet=${walletAddr}`,
+        }),
+        walletAuthenticatedFetch({
+          wallet: walletAddr,
+          signMessage,
+          path: `/api/company/me?employerWallet=${walletAddr}`,
         }),
       ]);
 
@@ -270,6 +296,10 @@ export default function DashboardPage() {
       }
       if (strRes.ok) {
         setStreams(strJson.streams ?? []);
+      }
+      if (compRes.ok) {
+        const compJson = await compRes.json();
+        setCompany(compJson.company || null);
       }
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Dashboard load failed");
@@ -361,9 +391,9 @@ export default function DashboardPage() {
       <div className="mx-auto max-w-6xl space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight text-white">Employer Dashboard</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-white">{company ? company.name : "Employer Dashboard"}</h1>
             <p className="text-sm text-[#a8a8aa] mt-1">
-              Real-time on-chain metrics, treasury health, and active stream analytics.
+              {company ? `Treasury: ${company.treasuryPubkey.slice(0, 4)}...${company.treasuryPubkey.slice(-4)}` : "Real-time on-chain metrics, treasury health, and active stream analytics."}
             </p>
           </div>
           
@@ -379,19 +409,30 @@ export default function DashboardPage() {
             
             <button
               onClick={() => setDepositOpen(true)}
-              className="inline-flex h-[44px] items-center gap-2 rounded-2xl border border-white/10 bg-[#0a0a0a] px-5 text-sm font-semibold text-white transition-colors hover:bg-white/5 shadow-sm"
+              disabled={!company}
+              className="inline-flex h-[44px] items-center gap-2 rounded-2xl border border-white/10 bg-[#0a0a0a] px-5 text-sm font-semibold text-white transition-colors hover:bg-white/5 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              <Download size={16} className="text-[#a8a8aa]" />
+              <Download size={16} className={company ? "text-[#a8a8aa]" : "text-[#a8a8aa]/50"} />
               Deposit
             </button>
             
-            <Link
-              href="/disburse"
-              className="inline-flex h-[44px] items-center gap-2 rounded-2xl bg-[#1eba98] px-5 text-sm font-semibold text-black transition-colors hover:bg-[#1eba98]/80 shadow-[0_0_20px_rgba(30,186,152,0.3)]"
-            >
-              <Plus size={16} />
-              Run Payroll
-            </Link>
+            {company ? (
+              <Link
+                href="/disburse"
+                className="inline-flex h-[44px] items-center gap-2 rounded-2xl bg-[#1eba98] px-5 text-sm font-semibold text-black transition-colors hover:bg-[#1eba98]/80 shadow-[0_0_20px_rgba(30,186,152,0.3)]"
+              >
+                <Plus size={16} />
+                Run Payroll
+              </Link>
+            ) : (
+              <button
+                onClick={() => setSetupOpen(true)}
+                className="inline-flex h-[44px] items-center gap-2 rounded-2xl bg-[#1eba98] px-5 text-sm font-semibold text-black transition-colors hover:bg-[#1eba98]/80 shadow-[0_0_20px_rgba(30,186,152,0.3)]"
+              >
+                <Building2 size={16} />
+                Setup Company
+              </button>
+            )}
           </div>
         </div>
 
@@ -542,13 +583,22 @@ export default function DashboardPage() {
         )}
       </div>
 
+
       <DepositModal
         isOpen={depositOpen}
         onClose={() => setDepositOpen(false)}
         baseBalance={baseBalance}
         privateBalance={vaultBalance}
+        treasuryPubkey={company?.treasuryPubkey}
         onDepositSuccess={() => {
           void refreshVaultBalance();
+          void loadDashboard();
+        }}
+      />
+      <SetupCompanyModal
+        isOpen={setupOpen}
+        onClose={() => setSetupOpen(false)}
+        onSuccess={() => {
           void loadDashboard();
         }}
       />

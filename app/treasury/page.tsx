@@ -49,6 +49,10 @@ export default function TreasuryPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [chartRange, setChartRange] = useState<"24H" | "7D" | "30D" | "All">("30D");
 
+  const [company, setCompany] = useState<{ id: string; name: string; treasuryPubkey: string } | null>(null);
+  const companyRef = useRef(company);
+  companyRef.current = company;
+
   const walletAddr = publicKey?.toBase58();
   const tokenCache = useRef<string | null>(null);
 
@@ -72,22 +76,56 @@ export default function TreasuryPage() {
     if (!walletAddr || !signMessage || !publicKey) return;
     setLoading(true);
     try {
-      const teeToken = await getOrFetchToken();
+      // 1. Fetch company data first
+      let currentCompany = companyRef.current;
+      if (!currentCompany) {
+        const cRes = await walletAuthenticatedFetch({
+          path: `/api/company/me?employerWallet=${walletAddr}`,
+          method: "GET",
+          signMessage,
+          wallet: walletAddr,
+        });
+        if (cRes.ok) {
+          const cData = await cRes.json();
+          if (cData.company) {
+            setCompany(cData.company);
+            currentCompany = cData.company;
+          }
+        }
+      }
 
-      const [privBalRes, baseBalRes, streamsRes, historyRes, employeesRes] = await Promise.all([
-        getPrivateBalance(walletAddr, teeToken).catch(() => null),
+      // 2. Fetch parallel data
+      const [baseBalRes, streamsRes, historyRes, employeesRes] = await Promise.all([
         getBalance(walletAddr).catch(() => null),
         walletAuthenticatedFetch({ path: `/api/streams?employerWallet=${walletAddr}`, method: "GET", signMessage, wallet: walletAddr }),
         walletAuthenticatedFetch({ path: `/api/history?wallet=${walletAddr}`, method: "GET", signMessage, wallet: walletAddr }),
         walletAuthenticatedFetch({ path: `/api/employees?employerWallet=${walletAddr}`, method: "GET", signMessage, wallet: walletAddr })
       ]);
 
-      if (privBalRes) {
-        setBalance(parseInt(privBalRes.balance ?? "0", 10) / 1_000_000);
-      }
       if (baseBalRes) {
         setBaseBalance(parseInt(baseBalRes.balance ?? "0", 10) / 1_000_000);
       }
+
+      // 3. Fetch private balance depending on if we have a company
+      if (currentCompany?.id) {
+        const treasuryRes = await walletAuthenticatedFetch({
+          path: `/api/company/${currentCompany.id}/balance?wallet=${walletAddr}`,
+          method: "GET",
+          signMessage,
+          wallet: walletAddr,
+        }).catch(() => null);
+        if (treasuryRes && treasuryRes.ok) {
+          const data = await treasuryRes.json();
+          setBalance(parseInt(data.balance ?? "0", 10) / 1_000_000);
+        }
+      } else {
+        const teeToken = await getOrFetchToken();
+        const privBalRes = await getPrivateBalance(walletAddr, teeToken).catch(() => null);
+        if (privBalRes) {
+          setBalance(parseInt(privBalRes.balance ?? "0", 10) / 1_000_000);
+        }
+      }
+
       if (streamsRes.ok) {
         const s = await streamsRes.json();
         setStreams(s.streams ?? []);
@@ -330,6 +368,7 @@ export default function TreasuryPage() {
           onClose={() => setDepositOpen(false)}
           baseBalance={baseBalance}
           privateBalance={balance ?? 0}
+          treasuryPubkey={company?.treasuryPubkey}
           onDepositSuccess={() => { void fetchData(); }}
         />
 
@@ -338,6 +377,8 @@ export default function TreasuryPage() {
           onClose={() => setWithdrawOpen(false)}
           baseBalance={baseBalance}
           privateBalance={balance ?? 0}
+          treasuryPubkey={company?.treasuryPubkey}
+          companyId={company?.id}
           onWithdrawSuccess={() => { void fetchData(); }}
         />
 
@@ -578,7 +619,7 @@ export default function TreasuryPage() {
                       <td className="py-4 px-6 text-right">
                         {item.txSig ? (
                           <a
-                            href={`https://explorer.solana.com/tx/${item.txSig}?cluster=devnet`}
+                            href={`https://solscan.io/tx/${item.txSig}?cluster=devnet`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-[10px] font-mono text-[#1eba98] hover:text-[#1eba98]/70 transition-colors cursor-pointer hover:underline"

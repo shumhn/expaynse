@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import { Loader2, X, Wallet, CheckCircle2, ExternalLink, ShieldCheck } from "lucide-react";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { deposit, signAndSend, checkHealth } from "@/lib/magicblock-api";
+import { deposit, buildPrivateTransfer, signAndSend, checkHealth, DEVNET_USDC } from "@/lib/magicblock-api";
+import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
 import { toast } from "sonner";
 import Link from "next/link";
 
-export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance = 0, onDepositSuccess }: { isOpen: boolean; onClose: () => void; baseBalance?: number; privateBalance?: number; onDepositSuccess?: () => void; }) {
+export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance = 0, onDepositSuccess, treasuryPubkey }: { isOpen: boolean; onClose: () => void; baseBalance?: number; privateBalance?: number; onDepositSuccess?: () => void; treasuryPubkey?: string }) {
   const { publicKey, signTransaction, signMessage } = useWallet();
   const [amount, setAmount] = useState("");
   const [loading, setLoading] = useState(false);
@@ -54,15 +55,58 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
     setLoading(true);
     try {
       const owner = publicKey.toBase58();
-      const depositRes = await deposit(owner, val);
-      const depositTx = depositRes.transactionBase64;
+      
+      let depositTx: string | undefined;
+      let sendTo: string | undefined;
 
-      if (depositTx) {
+      if (treasuryPubkey) {
+        const buildRes = await buildPrivateTransfer({
+          from: owner,
+          to: treasuryPubkey,
+          amount: val,
+          outputMint: DEVNET_USDC,
+          balances: {
+            fromBalance: "base",
+            toBalance: "ephemeral"
+          }
+        });
+        depositTx = buildRes.transactionBase64;
+        sendTo = buildRes.sendTo;
+      } else {
+        const depositRes = await deposit(owner, val);
+        depositTx = depositRes.transactionBase64;
+        sendTo = depositRes.sendTo;
+      }
+
+      if (depositTx && sendTo) {
         const sig = await signAndSend(depositTx, signTransaction, {
-          sendTo: depositRes.sendTo,
+          sendTo,
           signMessage: signMessage || undefined,
           publicKey: publicKey || undefined,
         });
+
+        // Save deposit to history
+        if (signMessage) {
+          try {
+            await walletAuthenticatedFetch({
+              path: "/api/history",
+              method: "POST",
+              signMessage,
+              wallet: owner,
+              body: {
+                kind: "setup-action",
+                wallet: owner,
+                type: "fund-treasury",
+                amount: val,
+                txSig: sig,
+                status: "success",
+              },
+            });
+          } catch (historyErr) {
+            console.error("Failed to save deposit to history", historyErr);
+          }
+        }
+
         toast.success(`Successfully deposited ${val} USDC`);
         setDepositedAmount(val);
         setSuccessSig(sig);
@@ -114,7 +158,7 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
 
             <div className="mb-8 space-y-2">
               <a
-                href={`https://explorer.solana.com/tx/${successSig}?cluster=devnet`}
+                href={`https://solscan.io/tx/${successSig}?cluster=devnet`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="group flex w-full items-center justify-between rounded-xl border border-white/5 bg-[#111111] px-4 py-3 transition-all hover:border-white/10 hover:bg-white/5"
@@ -183,17 +227,17 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
             <div className="text-center">
               <h2 className="mb-1 text-2xl font-bold tracking-tight text-white">Deposit to Treasury</h2>
               <p className="mb-8 text-sm text-[#a8a8aa]">
-                Add USDC to your ephemeral vault to fund payroll streams and manual disbursements.
+                Add USDC to the company treasury to fund payroll streams and manual disbursements.
               </p>
             </div>
 
             <div className="mb-6 grid grid-cols-2 gap-4">
               <div className="rounded-2xl border border-white/5 bg-white/5 p-4">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa] mb-1">Base Balance</p>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa] mb-1">Your Wallet Balance</p>
                 <p className="text-xl font-bold text-white">{baseBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-xs text-[#a8a8aa]">USDC</span></p>
               </div>
               <div className="rounded-2xl border border-white/5 bg-white/5 p-4">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa] mb-1">Private Balance</p>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa] mb-1">Treasury Balance</p>
                 <p className="text-xl font-bold text-white">{privateBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-xs text-[#a8a8aa]">USDC</span></p>
               </div>
             </div>
