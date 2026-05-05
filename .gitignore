@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local scratch / generated artifacts
+scratch/
+payroll1-rust/scratch/
+payroll1-rust/keys/
+*.log
+ephemeral✓
