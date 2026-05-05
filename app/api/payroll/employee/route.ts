@@ -19,9 +19,10 @@ import {
   evaluateMonthlyCap,
   hasCapStateChanged,
 } from "@/lib/server/monthly-cap";
+import type { CheckpointCrankStatus } from "@/lib/checkpoint-sync";
 
 const TEE_URL = "https://devnet-tee.magicblock.app";
-const PRIVATE_PAYROLL_STATE_LEN = 114;
+const PRIVATE_PAYROLL_STATE_LEN = 241;
 
 type PrivatePayrollPreview = {
   employeePda: string;
@@ -70,13 +71,7 @@ type EmployeePayrollStreamSummary = {
     recipientPrivateInitializedAt: string | null;
     lastPaidAt: string | null;
     totalPaid: number;
-    checkpointCrankStatus:
-      | "idle"
-      | "pending"
-      | "active"
-      | "failed"
-      | "stopped"
-      | null;
+    checkpointCrankStatus: CheckpointCrankStatus | null;
     checkpointCrankUpdatedAt: string | null;
     updatedAt: string;
   };
@@ -128,6 +123,8 @@ function readI64LE(buffer: Buffer, offset: number): bigint {
 
 function mapEmployeeStatusToStreamStatus(status?: number): PayrollStreamStatus {
   switch (status) {
+    case 0:
+      return "paused"; // 0-initialized on base chain means not streaming yet
     case 1:
       return "active";
     case 2:
@@ -174,14 +171,17 @@ function decodePrivatePayrollState(
   }
 
   const employee = new PublicKey(data.subarray(0, 32));
-  const streamId = data.subarray(32, 64).toString("hex");
-  const status = mapEmployeeStatusToStreamStatus(data.readUInt8(64));
-  const version = readU64LE(data, 65);
-  const lastCheckpointTs = readI64LE(data, 73);
-  const ratePerSecondMicro = readU64LE(data, 81);
-  const lastAccrualTimestamp = readI64LE(data, 89);
-  const accruedUnpaidMicro = readU64LE(data, 97);
-  const totalPaidPrivateMicro = readU64LE(data, 105);
+  const employeeWallet = new PublicKey(data.subarray(32, 64));
+  const streamId = data.subarray(64, 96).toString("hex");
+  const statusByte = data.readUInt8(192);
+  
+  const status = mapEmployeeStatusToStreamStatus(statusByte);
+  const version = readU64LE(data, 193);
+  const lastCheckpointTs = readI64LE(data, 201);
+  const ratePerSecondMicro = readU64LE(data, 209);
+  const lastAccrualTimestamp = readI64LE(data, 217);
+  const accruedUnpaidMicro = readU64LE(data, 225);
+  const totalPaidPrivateMicro = readU64LE(data, 233);
 
   return {
     employeePda: employeePda.toBase58(),
@@ -387,6 +387,7 @@ async function buildStreamSummary(args: {
         reason: "preview-available",
       };
     } catch (error: unknown) {
+      console.error("[Employee Dashboard] fetchPrivatePayrollPreview failed:", error);
       const missingPrivateState = isMissingPrivateStateError(error);
       preview = null;
       if (missingPrivateState) {

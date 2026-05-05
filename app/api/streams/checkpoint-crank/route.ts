@@ -11,6 +11,7 @@ import {
 
 import { createReadonlyAnchorWallet } from "@/lib/server/anchor-wallet";
 import { loadPayrollIdl } from "@/lib/server/payroll-idl";
+import { verifyAuthorizedWalletRequest } from "@/lib/wallet-request-auth";
 import {
   getEmployeePdaForStream,
   getPrivatePayrollPda,
@@ -151,7 +152,8 @@ function getCheckpointCrankMethods(
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as BuildCheckpointCrankBody;
+    const rawBody = await request.text();
+    const body = JSON.parse(rawBody) as BuildCheckpointCrankBody;
 
     const employerWallet = body.employerWallet?.trim();
     const streamId = body.streamId?.trim();
@@ -168,6 +170,23 @@ export async function POST(request: NextRequest) {
     if (!teeAuthToken) {
       return badRequest(
         "teeAuthToken is required to build checkpoint crank transactions",
+      );
+    }
+
+    try {
+      await verifyAuthorizedWalletRequest({
+        headers: request.headers,
+        expectedWallet: employerWallet,
+        method: request.method,
+        path: request.nextUrl.pathname,
+        body: rawBody,
+      });
+    } catch (error: unknown) {
+      return badRequest(
+        error instanceof Error
+          ? error.message
+          : "Employer authorization is required for checkpoint crank scheduling",
+        401,
       );
     }
 
@@ -215,8 +234,6 @@ export async function POST(request: NextRequest) {
       employerPubkey,
       teeAuthToken,
     );
-    const methods = getCheckpointCrankMethods(program);
-
     let checkpointCrankInstruction: TransactionInstruction;
 
     if (shouldSchedule) {
@@ -230,7 +247,7 @@ export async function POST(request: NextRequest) {
         assertPositiveInteger(body.iterations ?? 999_999_999, "iterations"),
       );
 
-      checkpointCrankInstruction = await methods
+      checkpointCrankInstruction = await program.methods
         .scheduleCheckpointAccrual({
           taskId: new BN(taskId.toString()),
           executionIntervalMillis: new BN(executionIntervalMillis.toString()),
@@ -245,13 +262,14 @@ export async function POST(request: NextRequest) {
         })
         .instruction();
     } else {
-      checkpointCrankInstruction = await methods
+      checkpointCrankInstruction = await program.methods
         .cancelCheckpointAccrual(new BN(taskId.toString()))
         .accounts({
           magicProgram: MAGIC_PROGRAM_ID,
           employer: employerPubkey,
           employee: employeePda,
           privatePayroll: privatePayrollPda,
+          permission: permissionPda,
         })
         .instruction();
     }
@@ -291,7 +309,8 @@ export async function POST(request: NextRequest) {
 
 export async function PATCH(request: NextRequest) {
   try {
-    const body = (await request.json()) as FinalizeCheckpointCrankBody;
+    const rawBody = await request.text();
+    const body = JSON.parse(rawBody) as FinalizeCheckpointCrankBody;
 
     const employerWallet = body.employerWallet?.trim();
     const streamId = body.streamId?.trim();
@@ -319,6 +338,23 @@ export async function PATCH(request: NextRequest) {
 
     if (!taskId) {
       return badRequest("taskId is required");
+    }
+
+    try {
+      await verifyAuthorizedWalletRequest({
+        headers: request.headers,
+        expectedWallet: employerWallet,
+        method: request.method,
+        path: request.nextUrl.pathname,
+        body: rawBody,
+      });
+    } catch (error: unknown) {
+      return badRequest(
+        error instanceof Error
+          ? error.message
+          : "Employer authorization is required for checkpoint crank finalization",
+        401,
+      );
     }
 
     const stream = await getStreamById(employerWallet, streamId);

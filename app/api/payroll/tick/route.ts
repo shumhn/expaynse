@@ -3,19 +3,27 @@ import * as anchor from "@coral-xyz/anchor";
 import type { Idl } from "@coral-xyz/anchor";
 import BN from "bn.js";
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+import { MAGIC_PROGRAM_ID } from "@magicblock-labs/ephemeral-rollups-sdk";
+
+const MAGIC_VAULT = new PublicKey("MagicVau1t999999999999999999999999999999999");
 
 import { createReadonlyAnchorWallet } from "@/lib/server/anchor-wallet";
 import {
-  buildPrivateTransfer,
   type PrivateTransferPrivacyConfig,
 } from "@/lib/magicblock-api";
+import crypto from "node:crypto";
+import { findCompanyByEmployerWallet } from "@/lib/server/company-store";
+import { loadCompanyKeypair } from "@/lib/server/company-key-vault";
+import { sendPayrollFromCompanyTreasury } from "@/lib/server/treasury-payroll-transfer";
 import { loadPayrollIdl } from "@/lib/server/payroll-idl";
+import { verifyAuthorizedWalletRequest } from "@/lib/wallet-request-auth";
 import {
   getEmployeePdaForStream,
   getPrivatePayrollPda,
 } from "@/lib/server/payroll-pdas";
 import {
   createTransferRecord,
+  findUnsettledTransfer,
   fulfillPendingCashoutRequestsForStream,
   getCashoutRequestById,
   getEmployeeById,
@@ -23,16 +31,22 @@ import {
   listStreams,
   resolveEmployeePrivateRecipientInitializedAt,
   resolveStreamPayoutMode,
+  sumSuccessfulTransferAmountMicroForStream,
   updateStreamRuntimeState,
   updateStreamStatus,
+  updateTransferStatus,
+  updateTransferRecord,
   type PayrollPayoutMode,
   type PayrollStreamRecord,
   type PayrollStreamStatus,
 } from "@/lib/server/payroll-store";
 import { savePayrollRun } from "@/lib/server/history-store";
+import {
+  evaluateMonthlyCap,
+} from "@/lib/server/monthly-cap";
+import { getConfirmedUnixTimestamp } from "@/lib/server/private-payroll-state";
 
-const TEE_URL = "https://devnet-tee.magicblock.app";
-const PRIVATE_PAYROLL_STATE_LEN = 114;
+const TEE_URL = process.env.NEXT_PUBLIC_MAGICBLOCK_TEE_RPC_URL || "https://devnet-tee.magicblock.app";
 const PAYROLL_TRANSFER_PRIVACY: PrivateTransferPrivacyConfig = {
   minDelayMs: 600_000,
   maxDelayMs: 600_000,
@@ -55,11 +69,13 @@ type PayrollTickBuildResult = {
   transferToBalance?: "base" | "ephemeral";
   employeePda?: string;
   privatePayrollPda?: string;
+  /** Signature of the treasury→employee transfer (already executed server-side) */
+  transferSignature?: string;
+  transferSendTo?: string;
+  accountingOnly?: boolean;
+  settlementAlreadyApplied?: boolean;
+  needsRecovery?: boolean;
   transactions?: {
-    transfer?: {
-      transactionBase64: string;
-      sendTo: string;
-    };
     settleSalary?: {
       transactionBase64: string;
       sendTo: "ephemeral";
@@ -85,8 +101,9 @@ type PayrollTickFinalizeItem = {
   transferSendTo?: string;
   employeePda: string;
   privatePayrollPda: string;
-  transferSignature: string;
-  settleSalarySignature: string;
+  transferSignature?: string;
+  accountingOnly?: boolean;
+  settleSalarySignature?: string;
   commitSignature: string;
 };
 
@@ -104,7 +121,51 @@ type ExactPrivatePayrollState = {
   totalPaidPrivateMicro: string;
 };
 
-let cachedIdl: Idl | null = null;
+function hasAppliedEmployerSettlement(args: {
+  state: ExactPrivatePayrollState;
+  transfer: Awaited<ReturnType<typeof findUnsettledTransfer>>;
+  amountMicro: number;
+}) {
+  const beforeTotalPaid = args.transfer?.providerMeta?.totalPaidPrivateBeforeMicro;
+  if (!beforeTotalPaid) return false;
+
+  return (
+    BigInt(args.state.totalPaidPrivateMicro) >=
+    BigInt(beforeTotalPaid) + BigInt(args.amountMicro)
+  );
+}
+
+function computeLiveClaimableAmountMicro(args: {
+  state: ExactPrivatePayrollState;
+  nowUnix: number;
+  startsAt?: string | null;
+}) {
+  const startsAtUnix = args.startsAt
+    ? Math.floor(new Date(args.startsAt).getTime() / 1000)
+    : null;
+  const hasFutureStart =
+    startsAtUnix !== null &&
+    Number.isFinite(startsAtUnix) &&
+    args.nowUnix < startsAtUnix;
+  const shouldAccrue = args.state.status === "active" && !hasFutureStart;
+  const lastAccrualUnix = Number(args.state.lastAccrualTimestamp);
+  const elapsedSeconds =
+    shouldAccrue && Number.isFinite(lastAccrualUnix)
+      ? Math.max(0, args.nowUnix - lastAccrualUnix)
+      : 0;
+  const pendingAccrualMicro = shouldAccrue
+    ? BigInt(args.state.ratePerSecondMicro) * BigInt(elapsedSeconds)
+    : BigInt(0);
+  const claimableAmountMicro =
+    BigInt(args.state.accruedUnpaidMicro) + pendingAccrualMicro;
+
+  return {
+    hasFutureStart,
+    elapsedSeconds,
+    pendingAccrualMicro,
+    claimableAmountMicro,
+  };
+}
 
 function badRequest(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
@@ -136,6 +197,8 @@ function readI64LE(buffer: Buffer, offset: number): bigint {
 
 function mapEmployeeStatusToStreamStatus(status?: number): PayrollStreamStatus {
   switch (status) {
+    case 0:
+      return "paused";
     case 1:
       return "active";
     case 2:
@@ -152,19 +215,34 @@ function decodePrivatePayrollState(
   employeePda: PublicKey,
   privatePayrollPda: PublicKey,
 ): ExactPrivatePayrollState {
-  if (data.length < PRIVATE_PAYROLL_STATE_LEN) {
+  // V2 PrivatePayrollState layout (matches Rust struct):
+  // offset 0:   employee           (32 bytes)
+  // offset 32:  employee_wallet    (32 bytes)
+  // offset 64:  stream_id          (32 bytes)
+  // offset 96:  mint               (32 bytes)
+  // offset 128: payroll_treasury   (32 bytes)
+  // offset 160: settlement_auth    (32 bytes)
+  // offset 192: status             (1 byte)
+  // offset 193: version            (8 bytes, u64 LE)
+  // offset 201: last_checkpoint_ts (8 bytes, i64 LE)
+  // offset 209: rate_per_second    (8 bytes, u64 LE)
+  // offset 217: last_accrual_ts    (8 bytes, i64 LE)
+  // offset 225: accrued_unpaid     (8 bytes, u64 LE)
+  // offset 233: total_paid_private (8 bytes, u64 LE)
+  const MIN_LEN = 241;
+  if (data.length < MIN_LEN) {
     throw new Error("Private payroll state account is not initialized");
   }
 
   const employee = new PublicKey(data.subarray(0, 32));
-  const streamId = data.subarray(32, 64).toString("hex");
-  const status = mapEmployeeStatusToStreamStatus(data.readUInt8(64));
-  const version = readU64LE(data, 65);
-  const lastCheckpointTs = readI64LE(data, 73);
-  const ratePerSecondMicro = readU64LE(data, 81);
-  const lastAccrualTimestamp = readI64LE(data, 89);
-  const accruedUnpaidMicro = readU64LE(data, 97);
-  const totalPaidPrivateMicro = readU64LE(data, 105);
+  const streamId = data.subarray(64, 96).toString("hex");
+  const status = mapEmployeeStatusToStreamStatus(data.readUInt8(192));
+  const version = readU64LE(data, 193);
+  const lastCheckpointTs = readI64LE(data, 201);
+  const ratePerSecondMicro = readU64LE(data, 209);
+  const lastAccrualTimestamp = readI64LE(data, 217);
+  const accruedUnpaidMicro = readU64LE(data, 225);
+  const totalPaidPrivateMicro = readU64LE(data, 233);
 
   return {
     employeePda: employeePda.toBase58(),
@@ -215,11 +293,7 @@ async function fetchExactPrivatePayrollState(args: {
 }
 
 async function loadIdl(provider: anchor.AnchorProvider) {
-  if (cachedIdl) return cachedIdl;
-
-  const idl = await loadPayrollIdl(provider);
-  cachedIdl = idl;
-  return idl;
+  return loadPayrollIdl(provider);
 }
 
 async function getTeeProgramForEmployer(
@@ -257,6 +331,7 @@ async function buildSettleTickForStream(args: {
   employerWallet: string;
   stream: PayrollStreamRecord;
   teeAuthToken: string;
+  treasuryKeypair: import("@solana/web3.js").Keypair;
   maxSettlementAmountMicro?: number;
   cashoutRequestId?: string;
 }): Promise<PayrollTickBuildResult> {
@@ -416,18 +491,53 @@ async function buildSettleTickForStream(args: {
     };
   }
 
-  const accruedAmountMicro = Number(exactState.accruedUnpaidMicro);
+  const nowUnix = await getConfirmedUnixTimestamp(teeConnection);
+  const rawClaimable = computeLiveClaimableAmountMicro({
+    state: exactState,
+    nowUnix,
+    startsAt: args.stream.startsAt ?? employee.startDate ?? null,
+  });
+  const cap = evaluateMonthlyCap({
+    stream: args.stream,
+    employee,
+    rawClaimableAmountMicro: rawClaimable.claimableAmountMicro,
+    totalPaidPrivateMicro: BigInt(exactState.totalPaidPrivateMicro),
+  });
+  const effectiveClaimableAmountMicro = rawClaimable.hasFutureStart
+    ? BigInt(0)
+    : BigInt(cap.effectiveClaimableAmountMicro);
 
-  if (!Number.isSafeInteger(accruedAmountMicro)) {
+  if (effectiveClaimableAmountMicro > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("PER accrued amount exceeds safe integer range");
   }
+
+  const accruedAmountMicro = Number(effectiveClaimableAmountMicro);
 
   const amountMicro =
     typeof requestedAmountMicro === "number"
       ? Math.min(accruedAmountMicro, requestedAmountMicro)
       : accruedAmountMicro;
+  const unsettled = await findUnsettledTransfer(args.stream.id);
+  const onChainPaidMicro = BigInt(exactState.totalPaidPrivateMicro);
+  const successfulPaidMicro =
+    await sumSuccessfulTransferAmountMicroForStream(args.stream.id);
+  const missingAppliedAccountingMicro =
+    !unsettled && successfulPaidMicro > onChainPaidMicro
+      ? successfulPaidMicro - onChainPaidMicro
+      : BigInt(0);
+  if (missingAppliedAccountingMicro > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("PER accounting repair amount exceeds safe integer range");
+  }
+  const accountingOnlyAmountMicro =
+    missingAppliedAccountingMicro > BigInt(0)
+      ? Number(
+        missingAppliedAccountingMicro > rawClaimable.claimableAmountMicro
+          ? rawClaimable.claimableAmountMicro
+          : missingAppliedAccountingMicro,
+      )
+      : 0;
 
-  if (amountMicro <= 0) {
+  if (!unsettled && amountMicro < 1 && accountingOnlyAmountMicro < 1) {
     return {
       streamId: args.stream.id,
       employeeId: args.stream.employeeId,
@@ -439,59 +549,202 @@ async function buildSettleTickForStream(args: {
       transferFromBalance,
       transferToBalance,
       skipped: true,
-      reason: "No accrued private payroll amount is available to settle",
-      elapsedSeconds: 0,
+      reason: amountMicro <= 0
+        ? "No accrued private payroll amount is available to settle"
+        : "Accrued amount is less than 1 micro USDC — too small to transfer",
+      elapsedSeconds: rawClaimable.elapsedSeconds,
       amountMicro,
       employeePda: employeePda.toBase58(),
       privatePayrollPda: privatePayrollPda.toBase58(),
     };
   }
 
-  const settleSalaryIx = await program.methods
-    .settleSalary(new BN(amountMicro))
-    .accounts({
-      employee: employeePda,
-      privatePayroll: privatePayrollPda,
-      employer: employerPubkey,
-    })
-    .instruction();
+  // unsettled.amount is stored in USDC; convert back to micro for the API
+  const actualAmountMicro = unsettled
+    ? Math.round(unsettled.amount * 1_000_000)
+    : accountingOnlyAmountMicro >= 1
+      ? accountingOnlyAmountMicro
+      : amountMicro;
+  const accountingOnly = !unsettled && accountingOnlyAmountMicro >= 1;
+  const settlementAlreadyApplied = hasAppliedEmployerSettlement({
+    state: exactState,
+    transfer: unsettled,
+    amountMicro: actualAmountMicro,
+  });
+  const settlementMeta = {
+    settleAmountMicro: String(actualAmountMicro),
+    privatePayrollVersionBefore: exactState.version,
+    accruedUnpaidBeforeMicro: exactState.accruedUnpaidMicro,
+    totalPaidPrivateBeforeMicro: exactState.totalPaidPrivateMicro,
+  };
+
+  const settleSalaryIx = settlementAlreadyApplied
+    ? null
+    : await program.methods
+      .paySalary(new BN(actualAmountMicro))
+      .accountsPartial({
+        crankOrEmployer: employerPubkey,
+        employer: employerPubkey,
+        employee: employeePda,
+        privatePayroll: privatePayrollPda,
+        vault: MAGIC_VAULT,
+        magicProgram: MAGIC_PROGRAM_ID,
+      })
+      .instruction();
 
   const commitIx = await program.methods
     .commitEmployee()
     .accountsPartial({
       employer: employerPubkey,
       employee: employeePda,
+      magicProgram: MAGIC_PROGRAM_ID,
     })
     .instruction();
 
-  const transferBuild = await buildPrivateTransfer({
-    from: employerWallet,
-    to: destinationWallet,
-    amountMicro,
-    token: args.teeAuthToken,
-    balances: {
-      fromBalance: transferFromBalance,
-      toBalance: transferToBalance,
-    },
-    privacy: PAYROLL_TRANSFER_PRIVACY,
-  });
-
-  if (!transferBuild.transactionBase64) {
-    throw new Error("Private Payments API returned no transactionBase64");
-  }
-
   const [settleSalarySerialized, commitSerialized] = await Promise.all([
-    serializeUnsignedTransaction(
-      teeConnection,
-      employerPubkey,
-      new Transaction().add(settleSalaryIx),
-    ),
+    settleSalaryIx
+      ? serializeUnsignedTransaction(
+        teeConnection,
+        employerPubkey,
+        new Transaction().add(settleSalaryIx),
+      )
+      : Promise.resolve(null),
     serializeUnsignedTransaction(
       teeConnection,
       employerPubkey,
       new Transaction().add(commitIx),
     ),
   ]);
+
+  if (accountingOnly) {
+    return {
+      streamId: args.stream.id,
+      employeeId: args.stream.employeeId,
+      employeeWallet: employee.wallet,
+      cashoutRequestId: args.cashoutRequestId,
+      requestedAmountMicro,
+      payoutMode: resolvedPayoutMode,
+      destinationWallet,
+      transferFromBalance,
+      transferToBalance,
+      skipped: false,
+      needsRecovery: true,
+      accountingOnly: true,
+      reason:
+        "An earlier payroll transfer is paid in the database but not consumed in PER accounting. Sign once to sync state; no new treasury transfer will be sent.",
+      elapsedSeconds: 0,
+      amountMicro: actualAmountMicro,
+      employeePda: employeePda.toBase58(),
+      privatePayrollPda: privatePayrollPda.toBase58(),
+      settlementAlreadyApplied: false,
+      transactions: {
+        ...(settleSalarySerialized
+          ? {
+            settleSalary: {
+              transactionBase64: Buffer.from(settleSalarySerialized).toString(
+                "base64",
+              ),
+              sendTo: "ephemeral" as const,
+            },
+          }
+          : {}),
+        commitEmployee: {
+          transactionBase64: Buffer.from(commitSerialized).toString("base64"),
+          sendTo: "ephemeral",
+        },
+      },
+    };
+  }
+
+  if (unsettled && unsettled.status !== "transfer_pending") {
+    return {
+      streamId: args.stream.id,
+      employeeId: args.stream.employeeId,
+      employeeWallet: employee.wallet,
+      cashoutRequestId: args.cashoutRequestId,
+      requestedAmountMicro,
+      payoutMode: resolvedPayoutMode,
+      destinationWallet,
+      transferFromBalance,
+      transferToBalance,
+      skipped: false,
+      needsRecovery: true,
+      reason: "A previous payroll transfer was sent but not settled on-chain.",
+      elapsedSeconds: 0,
+      amountMicro: actualAmountMicro,
+      employeePda: employeePda.toBase58(),
+      privatePayrollPda: privatePayrollPda.toBase58(),
+      transferSignature: unsettled.txSignature,
+      settlementAlreadyApplied,
+      transactions: {
+        ...(settleSalarySerialized
+          ? {
+            settleSalary: {
+              transactionBase64: Buffer.from(settleSalarySerialized).toString(
+                "base64",
+              ),
+              sendTo: "ephemeral" as const,
+            },
+          }
+          : {}),
+        commitEmployee: {
+          transactionBase64: Buffer.from(commitSerialized).toString("base64"),
+          sendTo: "ephemeral",
+        },
+      },
+    };
+  }
+
+  let pendingTransferId = unsettled?.id;
+  let clientRefId = unsettled?.providerMeta?.clientRefId;
+
+  if (!unsettled || unsettled.status !== "transfer_pending") {
+    const newTransfer = await createTransferRecord({
+      employerWallet: args.employerWallet,
+      employeeId: args.stream.employeeId,
+      streamId: args.stream.id,
+      amount: microToUsdc(actualAmountMicro),
+      recipientAddress: destinationWallet,
+      status: "transfer_pending",
+      providerMeta: { provider: "magicblock", ...settlementMeta },
+      privacyConfig: {
+        visibility: "private",
+        fromBalance: transferFromBalance ?? "ephemeral",
+        toBalance: transferToBalance ?? "ephemeral",
+      },
+    });
+    pendingTransferId = newTransfer.id;
+    // MagicBlock API requires clientRefId to be a non-negative bigint string
+    const hash = crypto.createHash("sha256").update(`payroll-${args.stream.id}-${pendingTransferId}`).digest();
+    clientRefId = BigInt("0x" + hash.subarray(0, 8).toString("hex")).toString();
+
+    await updateTransferRecord(pendingTransferId, {
+      providerMeta: { provider: "magicblock", clientRefId, ...settlementMeta },
+    });
+  }
+
+  // ── Execute treasury transfer server-side ──────────────────
+  const treasuryTransfer = await sendPayrollFromCompanyTreasury({
+    treasuryKeypair: args.treasuryKeypair,
+    employeeWallet: destinationWallet,
+    amountMicro: actualAmountMicro,
+    clientRefId: clientRefId as string,
+    fromBalance: transferFromBalance,
+    toBalance: transferToBalance,
+    privacy: PAYROLL_TRANSFER_PRIVACY,
+  });
+
+  // ── Immediate Pre-Save for Double-Spend Protection ───────────
+  await updateTransferRecord(pendingTransferId as string, {
+    status: "transfer_sent",
+    txSignature: treasuryTransfer.signature,
+    providerMeta: {
+      provider: "magicblock",
+      sendTo: treasuryTransfer.sendTo,
+      clientRefId,
+      ...settlementMeta,
+    },
+  });
 
   return {
     streamId: args.stream.id,
@@ -505,20 +758,23 @@ async function buildSettleTickForStream(args: {
     transferToBalance,
     skipped: false,
     elapsedSeconds: 0,
-    amountMicro,
+    amountMicro: actualAmountMicro,
     employeePda: employeePda.toBase58(),
     privatePayrollPda: privatePayrollPda.toBase58(),
+    transferSignature: treasuryTransfer.signature,
+    transferSendTo: treasuryTransfer.sendTo,
+    settlementAlreadyApplied: false,
     transactions: {
-      transfer: {
-        transactionBase64: transferBuild.transactionBase64,
-        sendTo: transferBuild.sendTo || "base",
-      },
-      settleSalary: {
-        transactionBase64: Buffer.from(settleSalarySerialized).toString(
-          "base64",
-        ),
-        sendTo: "ephemeral",
-      },
+      ...(settleSalarySerialized
+        ? {
+          settleSalary: {
+            transactionBase64: Buffer.from(settleSalarySerialized).toString(
+              "base64",
+            ),
+            sendTo: "ephemeral" as const,
+          },
+        }
+        : {}),
       commitEmployee: {
         transactionBase64: Buffer.from(commitSerialized).toString("base64"),
         sendTo: "ephemeral",
@@ -574,6 +830,23 @@ export async function POST(request: NextRequest) {
       body.employerWallet || "",
       "Employer wallet",
     );
+
+    // Verify authentication (only the employer who owns the wallet can initiate this)
+    // We expect `wallet` query param to match the employer's wallet, and they must have signed the request.
+    const urlWallet = request.nextUrl.searchParams.get("wallet")?.trim();
+    if (!urlWallet || urlWallet !== employerWallet) {
+      return badRequest("Wallet query param missing or mismatch", 401);
+    }
+
+    const rawBody = await request.text().catch(() => "");
+    await verifyAuthorizedWalletRequest({
+      headers: request.headers,
+      expectedWallet: urlWallet,
+      method: request.method,
+      path: `${request.nextUrl.pathname}${request.nextUrl.search}`,
+      body: rawBody || JSON.stringify(body),
+    });
+
     const teeAuthToken = body.teeAuthToken?.trim();
     const streamId = body.streamId?.trim();
     const cashoutRequestId = body.cashoutRequestId?.trim();
@@ -601,6 +874,27 @@ export async function POST(request: NextRequest) {
       ) {
         return badRequest("maxSettlementAmountMicro must be a positive integer");
       }
+    }
+
+    // ── Look up Company Treasury ───────────────────────────────
+    const company = await findCompanyByEmployerWallet(employerWallet);
+    if (!company) {
+      return badRequest(
+        "No company found for this employer wallet. Set up your company first.",
+        404,
+      );
+    }
+
+    const treasuryKeypair = await loadCompanyKeypair({
+      companyId: company.id,
+      kind: "treasury",
+    });
+
+    if (treasuryKeypair.publicKey.toBase58() !== company.treasuryPubkey) {
+      return badRequest(
+        "Treasury keypair does not match company treasury pubkey. Contact support.",
+        500,
+      );
     }
 
     let candidateStreams: PayrollStreamRecord[];
@@ -637,6 +931,7 @@ export async function POST(request: NextRequest) {
           employerWallet,
           stream,
           teeAuthToken,
+          treasuryKeypair,
           maxSettlementAmountMicro,
           cashoutRequestId,
         });
@@ -657,6 +952,19 @@ export async function POST(request: NextRequest) {
               : "Unknown tick build failure",
         });
       }
+    }
+
+    const needsRecoveryResults = results.filter((r) => r.needsRecovery);
+    if (needsRecoveryResults.length > 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          needsRecovery: true,
+          reason: "A previous payroll transfer was sent but not settled on-chain.",
+          results: needsRecoveryResults,
+        },
+        { status: 400 }
+      );
     }
 
     return NextResponse.json({
@@ -743,30 +1051,42 @@ export async function PATCH(request: NextRequest) {
         return badRequest(`Invalid transferToBalance for stream ${result.streamId}`);
       }
 
-      const transfer = await createTransferRecord({
-        employerWallet,
-        employeeId: result.employeeId,
-        streamId: result.streamId,
-        amount: microToUsdc(result.amountMicro),
-        recipientAddress: result.destinationWallet || result.employeeWallet,
-        txSignature: result.transferSignature,
-        status: "success",
-        privacyConfig: {
-          visibility: "private",
-          fromBalance: result.transferFromBalance ?? "ephemeral",
-          toBalance: result.transferToBalance ?? "ephemeral",
-        },
-        providerMeta: {
-          provider: "magicblock",
-          sendTo:
-            result.transferSendTo ||
-            (result.transferToBalance === "base" ? "base" : "ephemeral"),
-        },
-      });
-
       const existingStream = streamMap.get(result.streamId);
-      const nextTotalPaid =
-        (existingStream?.totalPaid ?? 0) + microToUsdc(result.amountMicro);
+      const nextTotalPaid = result.accountingOnly
+        ? existingStream?.totalPaid ?? 0
+        : (existingStream?.totalPaid ?? 0) + microToUsdc(result.amountMicro);
+
+      if (!result.accountingOnly) {
+        if (!result.transferSignature) {
+          return badRequest(`Missing transferSignature for stream ${result.streamId}`);
+        }
+
+        const unsettled = await findUnsettledTransfer(result.streamId);
+        if (unsettled) {
+          await updateTransferStatus(unsettled.id, "success", result.transferSignature);
+        } else {
+          await createTransferRecord({
+            employerWallet,
+            employeeId: result.employeeId,
+            streamId: result.streamId,
+            amount: microToUsdc(result.amountMicro),
+            recipientAddress: result.destinationWallet || result.employeeWallet,
+            txSignature: result.transferSignature,
+            status: "success",
+            privacyConfig: {
+              visibility: "private",
+              fromBalance: result.transferFromBalance ?? "ephemeral",
+              toBalance: result.transferToBalance ?? "ephemeral",
+            },
+            providerMeta: {
+              provider: "magicblock",
+              sendTo:
+                result.transferSendTo ||
+                (result.transferToBalance === "base" ? "base" : "ephemeral"),
+            },
+          });
+        }
+      }
 
       await updateStreamRuntimeState({
         employerWallet,
@@ -774,32 +1094,34 @@ export async function PATCH(request: NextRequest) {
         employeePda: result.employeePda,
         privatePayrollPda: result.privatePayrollPda,
         delegatedAt: new Date().toISOString(),
-        lastPaidAt: new Date().toISOString(),
+        ...(result.accountingOnly ? {} : { lastPaidAt: new Date().toISOString() }),
         totalPaid: nextTotalPaid,
       });
 
-      if (
-        result.cashoutRequestId &&
-        result.requestedAmountMicro !== undefined &&
-        result.amountMicro >= result.requestedAmountMicro
-      ) {
-        await fulfillPendingCashoutRequestsForStream({
-          employerWallet,
-          streamId: result.streamId,
-          requestId: result.cashoutRequestId,
-          resolvedByWallet: employerWallet,
-          resolutionNote:
-            "Fulfilled automatically after employer settled the requested cashout amount.",
-        });
-      } else if (!result.cashoutRequestId) {
-        await fulfillPendingCashoutRequestsForStream({
-          employerWallet,
-          streamId: result.streamId,
-          settledAmountMicro: result.amountMicro,
-          resolvedByWallet: employerWallet,
-          resolutionNote:
-            "Fulfilled automatically after employer settlement tick.",
-        });
+      if (!result.accountingOnly) {
+        if (
+          result.cashoutRequestId &&
+          result.requestedAmountMicro !== undefined &&
+          result.amountMicro >= result.requestedAmountMicro
+        ) {
+          await fulfillPendingCashoutRequestsForStream({
+            employerWallet,
+            streamId: result.streamId,
+            requestId: result.cashoutRequestId,
+            resolvedByWallet: employerWallet,
+            resolutionNote:
+              "Fulfilled automatically after employer settled the requested cashout amount.",
+          });
+        } else if (!result.cashoutRequestId) {
+          await fulfillPendingCashoutRequestsForStream({
+            employerWallet,
+            streamId: result.streamId,
+            settledAmountMicro: result.amountMicro,
+            resolvedByWallet: employerWallet,
+            resolutionNote:
+              "Fulfilled automatically after employer settlement tick.",
+          });
+        }
       }
 
       if (existingStream) {
@@ -809,14 +1131,16 @@ export async function PATCH(request: NextRequest) {
         });
       }
 
-      totalTransferredMicro += result.amountMicro;
-      successfulRecipients.push(result.destinationWallet || result.employeeWallet);
+      if (!result.accountingOnly) {
+        totalTransferredMicro += result.amountMicro;
+        successfulRecipients.push(result.destinationWallet || result.employeeWallet);
+      }
 
-      if (!firstTransferSignature) {
-        firstTransferSignature = transfer.txSignature;
-        firstProviderSendTo = transfer.providerMeta?.sendTo;
-        firstTransferFromBalance = transfer.privacyConfig?.fromBalance;
-        firstTransferToBalance = transfer.privacyConfig?.toBalance;
+      if (!result.accountingOnly && !firstTransferSignature) {
+        firstTransferSignature = result.transferSignature;
+        firstProviderSendTo = result.transferSendTo || (result.transferToBalance === "base" ? "base" : "ephemeral");
+        firstTransferFromBalance = result.transferFromBalance ?? "ephemeral";
+        firstTransferToBalance = result.transferToBalance ?? "ephemeral";
       }
     }
 

@@ -24,7 +24,7 @@ import {
 } from "@/lib/server/payroll-store";
 
 const PROGRAM_ID = new PublicKey(
-  "EMM7YS2Jhzmu5fgF71vHty6P2tP7dErENL6tp3YppAYR",
+  "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6",
 );
 const DEVNET_RPC = clusterApiUrl("devnet");
 const TEE_URL = "https://devnet-tee.magicblock.app";

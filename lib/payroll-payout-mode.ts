@@ -14,15 +14,10 @@ export const PAYROLL_PAYOUT_MODE_OPTIONS: PayrollPayoutModeOption[] = [
     label: "Private stream (ephemeral)",
     description: "Private-to-private payroll settlement on PER.",
   },
-  {
-    value: "base",
-    label: "Direct payout (base)",
-    description: "Settle directly to base wallet balances.",
-  },
 ];
 
 export function allowedPayoutModesFor(mode: PayrollPayoutMode): PayrollPayoutMode[] {
-  return mode === "ephemeral" ? ["ephemeral", "base"] : ["base", "ephemeral"];
+  return ["ephemeral"];
 }
 
 export function payoutModeSummary(mode: PayrollPayoutMode): string {

@@ -16,9 +16,9 @@ import {
   evaluateMonthlyCap,
   hasCapStateChanged,
 } from "@/lib/server/monthly-cap";
+import { deriveObservedCheckpointCrankStatus } from "@/lib/checkpoint-sync";
 
 const TEE_URL = "https://devnet-tee.magicblock.app";
-const PRIVATE_PAYROLL_STATE_LEN = 114;
 
 type ExactPrivatePayrollState = {
   employeePda: string;
@@ -31,6 +31,8 @@ type ExactPrivatePayrollState = {
   ratePerSecondMicro: string;
   lastAccrualTimestamp: string;
   accruedUnpaidMicro: string;
+  rawClaimableAmountMicro: string;
+  pendingAccrualMicro: string;
   totalPaidPrivateMicro: string;
   effectiveClaimableAmountMicro: string;
   monthlyCapUsd: number | null;
@@ -59,6 +61,8 @@ type ExactPrivatePayrollStateResponse = {
     privatePayrollPda: string | null;
     permissionPda: string | null;
     delegatedAt: string | null;
+    checkpointCrankStatus?: "idle" | "pending" | "active" | "failed" | "stopped" | "stale" | null;
+    checkpointCrankUpdatedAt?: string | null;
     lastPaidAt: string | null;
     totalPaid: number;
   };
@@ -99,6 +103,8 @@ function readI64LE(buffer: Buffer, offset: number): bigint {
 
 function mapEmployeeStatusToStreamStatus(status?: number): PayrollStreamStatus {
   switch (status) {
+    case 0:
+      return "paused"; // 0-initialized on base chain means not streaming yet
     case 1:
       return "active";
     case 2:
@@ -106,7 +112,9 @@ function mapEmployeeStatusToStreamStatus(status?: number): PayrollStreamStatus {
     case 3:
       return "stopped";
     default:
-      throw new Error(`Unknown private payroll status: ${String(status)}`);
+      throw new Error(
+        "Private payroll state account is not initialized (unexpected status byte)"
+      );
   }
 }
 
@@ -115,19 +123,51 @@ function decodePrivatePayrollState(
   employeePda: PublicKey,
   privatePayrollPda: PublicKey,
 ): ExactPrivatePayrollState {
-  if (data.length < PRIVATE_PAYROLL_STATE_LEN) {
+  // PrivatePayrollState uses AnchorSerialize (not #[account]),
+  // so there is NO 8-byte Anchor discriminator.
+  // The ephemeral account allocates 8 + LEN bytes, but serialize writes from byte 0.
+  //
+  // V2 PrivatePayrollState layout:
+  // offset 0:   employee           (32 bytes)
+  // offset 32:  employee_wallet    (32 bytes)
+  // offset 64:  stream_id          (32 bytes)
+  // offset 96:  mint               (32 bytes)
+  // offset 128: payroll_treasury   (32 bytes)
+  // offset 160: settlement_auth    (32 bytes)
+  // offset 192: status             (1 byte)
+  // offset 193: version            (8 bytes, u64 LE)
+  // offset 201: last_checkpoint_ts (8 bytes, i64 LE)
+  // offset 209: rate_per_second    (8 bytes, u64 LE)
+  // offset 217: last_accrual_ts    (8 bytes, i64 LE)
+  // offset 225: accrued_unpaid     (8 bytes, u64 LE)
+  // offset 233: total_paid_private (8 bytes, u64 LE)
+  // offset 241: total_cancelled    (8 bytes, u64 LE)
+  // offset 249: next_claim_id      (8 bytes, u64 LE)
+  // offset 257: pending_claim_id   (8 bytes, u64 LE)
+  // offset 265: pending_amount     (8 bytes, u64 LE)
+  // offset 273: pending_client_ref (32 bytes)
+  // offset 305: pending_req_at     (8 bytes, i64 LE)
+  // offset 313: pending_status     (1 byte)
+  // offset 314: bump               (1 byte)
+  // TOTAL: 315 bytes
+
+  const MIN_LEN = 241; // enough to read through total_paid_private
+  if (data.length < MIN_LEN) {
     throw new Error("Private payroll state account is not initialized");
   }
 
   const employee = new PublicKey(data.subarray(0, 32));
-  const streamId = data.subarray(32, 64).toString("hex");
-  const status = mapEmployeeStatusToStreamStatus(data.readUInt8(64));
-  const version = readU64LE(data, 65);
-  const lastCheckpointTs = readI64LE(data, 73);
-  const ratePerSecondMicro = readU64LE(data, 81);
-  const lastAccrualTimestamp = readI64LE(data, 89);
-  const accruedUnpaidMicro = readU64LE(data, 97);
-  const totalPaidPrivateMicro = readU64LE(data, 105);
+  const streamIdBytes = data.subarray(64, 96);
+  const streamId = streamIdBytes.toString("hex");
+  
+  const statusByte = data.readUInt8(192);
+  const status = mapEmployeeStatusToStreamStatus(statusByte);
+  const version = readU64LE(data, 193);
+  const lastCheckpointTs = readI64LE(data, 201);
+  const ratePerSecondMicro = readU64LE(data, 209);
+  const lastAccrualTimestamp = readI64LE(data, 217);
+  const accruedUnpaidMicro = readU64LE(data, 225);
+  const totalPaidPrivateMicro = readU64LE(data, 233);
 
   return {
     employeePda: employeePda.toBase58(),
@@ -140,6 +180,8 @@ function decodePrivatePayrollState(
     ratePerSecondMicro: String(ratePerSecondMicro),
     lastAccrualTimestamp: String(lastAccrualTimestamp),
     accruedUnpaidMicro: String(accruedUnpaidMicro),
+    rawClaimableAmountMicro: String(accruedUnpaidMicro),
+    pendingAccrualMicro: "0",
     totalPaidPrivateMicro: String(totalPaidPrivateMicro),
     effectiveClaimableAmountMicro: String(accruedUnpaidMicro),
     monthlyCapUsd: null,
@@ -226,21 +268,27 @@ export async function GET(request: NextRequest) {
       teeAuthToken,
     });
 
-    const cap = evaluateMonthlyCap({
-      stream,
-      employee,
-      rawClaimableAmountMicro: BigInt(state.accruedUnpaidMicro),
-      totalPaidPrivateMicro: BigInt(state.totalPaidPrivateMicro),
-    });
-
     const startsAtUnix = stream.startsAt
       ? new Date(stream.startsAt).getTime()
       : employee.startDate
         ? new Date(employee.startDate).getTime()
         : null;
     const hasFutureStart =
-      startsAtUnix !== null && Number.isFinite(startsAtUnix) && startsAtUnix > Date.now();
+      startsAtUnix !== null &&
+      Number.isFinite(startsAtUnix) &&
+      startsAtUnix > Date.now();
+    const pendingAccrualMicro = BigInt(0);
+    const rawClaimableAmountMicro = BigInt(state.accruedUnpaidMicro);
 
+    const cap = evaluateMonthlyCap({
+      stream,
+      employee,
+      rawClaimableAmountMicro,
+      totalPaidPrivateMicro: BigInt(state.totalPaidPrivateMicro),
+    });
+
+    state.rawClaimableAmountMicro = rawClaimableAmountMicro.toString();
+    state.pendingAccrualMicro = pendingAccrualMicro.toString();
     state.effectiveClaimableAmountMicro = cap.effectiveClaimableAmountMicro;
     state.monthlyCapUsd = cap.monthlyCapUsd;
     state.monthlyCapMicro = cap.monthlyCapMicro;
@@ -279,6 +327,22 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    const observedCheckpointCrankStatus = deriveObservedCheckpointCrankStatus({
+      currentStatus: stream.checkpointCrankStatus,
+      lastAccrualTimestamp: state.lastAccrualTimestamp,
+    });
+
+    if (observedCheckpointCrankStatus !== stream.checkpointCrankStatus) {
+      await updateStreamRuntimeState({
+        employerWallet,
+        streamId,
+        checkpointCrankStatus: observedCheckpointCrankStatus,
+        checkpointCrankUpdatedAt: new Date().toISOString(),
+      });
+      stream.checkpointCrankStatus = observedCheckpointCrankStatus;
+      stream.checkpointCrankUpdatedAt = new Date().toISOString();
+    }
+
     const response: ExactPrivatePayrollStateResponse = {
       employerWallet,
       streamId,
@@ -295,6 +359,8 @@ export async function GET(request: NextRequest) {
         privatePayrollPda: stream.privatePayrollPda ?? state.privatePayrollPda,
         permissionPda: stream.permissionPda ?? null,
         delegatedAt: stream.delegatedAt ?? null,
+        checkpointCrankStatus: stream.checkpointCrankStatus ?? null,
+        checkpointCrankUpdatedAt: stream.checkpointCrankUpdatedAt ?? null,
         lastPaidAt: stream.lastPaidAt,
         totalPaid: stream.totalPaid,
       },

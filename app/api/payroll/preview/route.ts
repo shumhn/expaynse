@@ -17,7 +17,7 @@ import {
 } from "@/lib/server/monthly-cap";
 
 const TEE_URL = "https://devnet-tee.magicblock.app";
-const PRIVATE_PAYROLL_STATE_LEN = 114;
+const PRIVATE_PAYROLL_STATE_LEN = 300;
 interface PrivatePayrollStatePreview {
   employeePda: string;
   privatePayrollPda: string;
@@ -66,6 +66,8 @@ function readI64LE(buffer: Buffer, offset: number): bigint {
 
 function mapEmployeeStatusToStreamStatus(status?: number): PayrollStreamStatus {
   switch (status) {
+    case 0:
+      return "paused";
     case 1:
       return "active";
     case 2:
@@ -96,19 +98,34 @@ function decodePrivatePayrollState(
   | "remainingCapMicro"
   | "capReached"
 > {
-  if (data.length < PRIVATE_PAYROLL_STATE_LEN) {
-    throw new Error("Private payroll state account is not initialized");
+  if (data.length < 241) {
+    throw new Error(`Private payroll state account is too small: ${data.length}`);
   }
 
+  // V2 PrivatePayrollState layout (matches Rust struct):
+  // offset 0:   employee           (32 bytes)
+  // offset 32:  employee_wallet    (32 bytes)
+  // offset 64:  stream_id          (32 bytes)
+  // offset 96:  mint               (32 bytes)
+  // offset 128: payroll_treasury   (32 bytes)
+  // offset 160: settlement_auth    (32 bytes)
+  // offset 192: status             (1 byte)
+  // offset 193: version            (8 bytes, u64 LE)
+  // offset 201: last_checkpoint_ts (8 bytes, i64 LE)
+  // offset 209: rate_per_second    (8 bytes, u64 LE)
+  // offset 217: last_accrual_ts    (8 bytes, i64 LE)
+  // offset 225: accrued_unpaid     (8 bytes, u64 LE)
+  // offset 233: total_paid_private (8 bytes, u64 LE)
+  
   const employee = new PublicKey(data.subarray(0, 32));
-  const streamId = data.subarray(32, 64).toString("hex");
-  const status = mapEmployeeStatusToStreamStatus(data.readUInt8(64));
-  const version = readU64LE(data, 65);
-  const lastCheckpointTs = readI64LE(data, 73);
-  const ratePerSecondMicro = readU64LE(data, 81);
-  const lastAccrualTimestamp = readI64LE(data, 89);
-  const accruedUnpaidMicro = readU64LE(data, 97);
-  const totalPaidPrivateMicro = readU64LE(data, 105);
+  const streamId = data.subarray(64, 96).toString("hex");
+  const status = mapEmployeeStatusToStreamStatus(data.readUInt8(192));
+  const version = readU64LE(data, 193);
+  const lastCheckpointTs = readI64LE(data, 201);
+  const ratePerSecondMicro = readU64LE(data, 209);
+  const lastAccrualTimestamp = readI64LE(data, 217);
+  const accruedUnpaidMicro = readU64LE(data, 225);
+  const totalPaidPrivateMicro = readU64LE(data, 233);
 
   return {
     employeePda: employeePda.toBase58(),

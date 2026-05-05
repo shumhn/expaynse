@@ -80,6 +80,7 @@ export interface PrivateTransferBuildRequest {
   token?: string;
   balances?: PrivateTransferBalances;
   privacy?: PrivateTransferPrivacyConfig;
+  clientRefId?: string;
 }
 
 export interface PrivateTransferBuildResponse {
@@ -376,7 +377,7 @@ export async function signAndSend(
       try {
         const latestAtSend = await conn.getLatestBlockhash("confirmed");
         const sig = await conn.sendRawTransaction(raw, {
-          skipPreflight: false,
+          skipPreflight: true,
         });
         await confirmAndAssertSignature(conn, sig, {
           blockhash: blockhash || latestAtSend.blockhash,
@@ -560,7 +561,7 @@ export async function buildPrivateTransfer(
     from: input.from,
     to: input.to,
     mint: input.outputMint || DEVNET_USDC,
-    amount: amountMicro,
+    amount: Math.round(amountMicro),
     visibility: "private",
     fromBalance: input.balances?.fromBalance || "base",
     toBalance: input.balances?.toBalance || "ephemeral",
@@ -584,6 +585,12 @@ export async function buildPrivateTransfer(
 
   if (input.privacy?.memo?.trim()) {
     body.memo = input.privacy.memo.trim();
+  }
+
+  if (input.clientRefId?.trim()) {
+    // MagicBlock API requires clientRefId to be a non-negative bigint string
+    const raw = input.clientRefId.trim();
+    body.clientRefId = /^\d+$/.test(raw) ? raw : "0";
   }
 
   const res = await post(

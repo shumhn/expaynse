@@ -9,6 +9,7 @@ import {
   createCashoutRequest,
   listCashoutRequestsForEmployee,
   listCashoutRequestsForEmployer,
+  listOnChainClaimsForEmployer,
   resolveCashoutRequest,
   type CashoutRequestStatus,
 } from "@/lib/server/payroll-store";
@@ -96,6 +97,7 @@ export async function GET(request: NextRequest) {
       request.nextUrl.searchParams.get("employerWallet") ?? "",
       "Employer wallet",
     );
+    const streamId = request.nextUrl.searchParams.get("streamId")?.trim() || undefined;
 
     await verifyAuthorizedWalletRequest({
       headers: request.headers,
@@ -104,7 +106,21 @@ export async function GET(request: NextRequest) {
       path: request.nextUrl.pathname + request.nextUrl.search,
     });
 
-    const requests = await listCashoutRequestsForEmployer(employerWallet);
+    const requests = await listCashoutRequestsForEmployer(employerWallet, streamId);
+    const onChainClaims = await listOnChainClaimsForEmployer(employerWallet, streamId);
+    
+    // Map onChainClaims to look like cashout requests for the employer UI
+    const mappedClaims = onChainClaims.map(claim => ({
+      id: claim.id,
+      employeeWallet: claim.employeeWallet,
+      streamId: claim.streamId,
+      requestedAmount: claim.amountMicro / 1_000_000,
+      payoutMode: "ephemeral",
+      status: claim.status,
+      createdAt: claim.createdAt,
+      updatedAt: claim.updatedAt,
+      isOnChain: true
+    }));
 
     await saveComplianceEvent({
       actorWallet: employerWallet,
@@ -113,10 +129,12 @@ export async function GET(request: NextRequest) {
       subjectWallet: employerWallet,
       resourceType: "cashout-request",
       status: "success",
-      metadata: { scope, count: requests.length },
+      metadata: { scope, count: requests.length + mappedClaims.length, streamId: streamId ?? null },
     });
 
-    return NextResponse.json({ requests });
+    return NextResponse.json({ 
+      requests: [...requests, ...mappedClaims] 
+    });
   } catch (error: unknown) {
     return badRequest(
       error instanceof Error

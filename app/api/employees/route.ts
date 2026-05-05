@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createEmployee, listEmployees } from "@/lib/server/payroll-store";
+import {
+  createEmployee,
+  getEmployeeById,
+  listEmployees,
+} from "@/lib/server/payroll-store";
 import { saveComplianceEvent } from "@/lib/server/compliance-store";
 import {
   isWalletAuthorizationError,
   verifyAuthorizedWalletRequest,
 } from "@/lib/wallet-request-auth";
+import { sponsorInitializeEmployeeVault } from "@/lib/server/sponsor";
 
 function getEmployerWalletFromRequest(request: NextRequest) {
   const wallet = request.nextUrl.searchParams.get("employerWallet")?.trim();
@@ -88,6 +93,18 @@ export async function POST(request: NextRequest) {
       monthlySalaryUsd: body.monthlySalaryUsd,
       startDate: body.startDate,
     });
+    try {
+      await sponsorInitializeEmployeeVault(employee.wallet);
+    } catch (sponsorError) {
+      console.error(
+        `Sponsor initialization crashed for ${employee.wallet}:`,
+        sponsorError,
+      );
+    }
+
+    const latestEmployee =
+      (await getEmployeeById(body.employerWallet ?? "", employee.id)) ?? employee;
+
     await saveComplianceEvent({
       actorWallet: body.employerWallet ?? "",
       action: "employees.create",
@@ -96,9 +113,16 @@ export async function POST(request: NextRequest) {
       resourceType: "employee",
       resourceId: employee.id,
       status: "success",
+      metadata: {
+        employeeWallet: employee.wallet,
+        privateInitStatus: latestEmployee.privateRecipientInitStatus ?? "pending",
+        privateInitReady:
+          latestEmployee.privateRecipientInitStatus === "confirmed",
+        privateInitError: latestEmployee.privateRecipientInitError ?? null,
+      },
     });
 
-    return NextResponse.json({ employee }, { status: 201 });
+    return NextResponse.json({ employee: latestEmployee }, { status: 201 });
   } catch (error: unknown) {
     const message =
       error instanceof Error ? error.message : "Failed to create employee";

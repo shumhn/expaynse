@@ -246,6 +246,19 @@ export async function POST(request: NextRequest) {
         .instruction();
 
       controlIx = new Transaction().add(ix);
+
+      if (typeof body.ratePerSecond === "number") {
+        const rateMicroUnits = toRateMicroUnits(body.ratePerSecond);
+        const updateRateIx = await program.methods
+          .updatePrivateTerms(new BN(rateMicroUnits))
+          .accounts({
+            employer: employerPubkey,
+            employee: employeePda,
+            privatePayroll: privatePayrollPda,
+          })
+          .instruction();
+        controlIx.add(updateRateIx);
+      }
     } else {
       const ix = await program.methods
         .stopStream()
@@ -259,22 +272,7 @@ export async function POST(request: NextRequest) {
       controlIx = new Transaction().add(ix);
     }
 
-    const commitIx = await program.methods
-      .commitEmployee()
-      .accountsPartial({
-        employer: employerPubkey,
-        employee: employeePda,
-      })
-      .instruction();
-
-    const [controlSerialized, commitSerialized] = await Promise.all([
-      serializeUnsignedTransaction(connection, employerPubkey, controlIx),
-      serializeUnsignedTransaction(
-        connection,
-        employerPubkey,
-        new Transaction().add(commitIx),
-      ),
-    ]);
+    const controlSerialized = await serializeUnsignedTransaction(connection, employerPubkey, controlIx);
 
     const response: BuildControlResponse = {
       employerWallet,
@@ -289,11 +287,9 @@ export async function POST(request: NextRequest) {
           transactionBase64: Buffer.from(controlSerialized).toString("base64"),
           sendTo: "ephemeral",
         },
-        commitEmployee: {
-          transactionBase64: Buffer.from(commitSerialized).toString("base64"),
-          sendTo: "ephemeral",
-        },
-      },
+        // We keep commitEmployee as an empty object or remove it to avoid breaking types if they are shared, 
+        // but since we define it here, we'll just remove it from the response.
+      } as any,
     };
 
     return NextResponse.json(response, { status: 201 });
@@ -330,8 +326,8 @@ export async function PATCH(request: NextRequest) {
       return badRequest("employeePda and privatePayrollPda are required");
     }
 
-    if (!controlSignature || !commitSignature) {
-      return badRequest("controlSignature and commitSignature are required");
+    if (!controlSignature) {
+      return badRequest("controlSignature is required");
     }
 
     const stream = await getStreamById(employerWallet, streamId);

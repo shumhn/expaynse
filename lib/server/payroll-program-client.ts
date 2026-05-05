@@ -3,11 +3,12 @@ import fs from "fs";
 import BN from "bn.js";
 import * as anchor from "@coral-xyz/anchor";
 import type { Idl } from "@coral-xyz/anchor";
-import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import nacl from "tweetnacl";
 import {
   createDelegatePermissionInstruction,
   getAuthToken,
+  MAGIC_PROGRAM_ID,
   PERMISSION_PROGRAM_ID,
   permissionPdaFromAccount,
 } from "@magicblock-labs/ephemeral-rollups-sdk";
@@ -18,9 +19,11 @@ import {
   getPayrollStreamSeedArg,
   getPrivatePayrollPda,
 } from "@/lib/server/payroll-pdas";
+import { buildPrivateTransfer, DEVNET_USDC } from "@/lib/magicblock-api";
 
 const DEVNET_RPC = "https://api.devnet.solana.com";
 const TEE_URL = "https://devnet-tee.magicblock.app";
+const MAGIC_VAULT = new PublicKey("MagicVau1t999999999999999999999999999999999");
 const DEVNET_TEE_VALIDATOR = new PublicKey(
   "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo",
 );
@@ -313,6 +316,8 @@ export async function onboardEmployeeToPayrollProgram(input: {
       employer: payer.publicKey,
       employee: employeePda,
       privatePayroll: privatePayrollPda,
+      vault: MAGIC_VAULT,
+      magicProgram: MAGIC_PROGRAM_ID,
     })
     .instruction();
 
@@ -321,6 +326,37 @@ export async function onboardEmployeeToPayrollProgram(input: {
     new Transaction().add(initializePrivatePayrollIx),
     payer,
   );
+
+  // --- Auto-Initialize Employee Vault ---
+  // The Backend Payer will send 1 micro USDC to the employee's ephemeral balance.
+  // This forces the MagicBlock API to automatically prepend the base-chain 
+  // `CreateVault` and `DelegateVault` instructions so the employee doesn't have to pay rent.
+  let employeeVaultInitSignature = null;
+  try {
+    const initTransferRes = await buildPrivateTransfer({
+      from: payer.publicKey.toBase58(),
+      to: input.employeeWallet,
+      amountMicro: 1, // Minimum positive amount
+      outputMint: DEVNET_USDC,
+      balances: { fromBalance: "base", toBalance: "ephemeral" },
+    });
+
+    if (initTransferRes.transactionBase64) {
+      const txBuf = Buffer.from(initTransferRes.transactionBase64, "base64");
+      const initTx = VersionedTransaction.deserialize(txBuf);
+      
+      const latest = await connection.getLatestBlockhash("confirmed");
+      initTx.message.recentBlockhash = latest.blockhash;
+      initTx.sign([payer]);
+      
+      employeeVaultInitSignature = await connection.sendRawTransaction(initTx.serialize(), { skipPreflight: false });
+      await connection.confirmTransaction({ signature: employeeVaultInitSignature, ...latest }, "confirmed");
+      console.log(`Auto-initialized Employee Vault. Tx: ${employeeVaultInitSignature}`);
+    }
+  } catch (err) {
+    console.warn("Failed to auto-initialize employee vault during onboarding. Employee may already have a vault or need manual init.", err);
+  }
+  // --------------------------------------
 
   return {
     employeePda: employeePda.toBase58(),
@@ -346,12 +382,13 @@ export async function accruePayrollInTee(input: {
   const privatePayrollPda = getPrivatePayrollPda(employeePda);
 
   const paySalaryIx = await typedProgram.methods
-    .paySalary()
+    .checkpointAccrual()
     .accounts({
-      crankOrEmployer: payer.publicKey,
       employer: payer.publicKey,
       employee: employeePda,
       privatePayroll: privatePayrollPda,
+      vault: MAGIC_VAULT,
+      magicProgram: MAGIC_PROGRAM_ID,
     })
     .instruction();
 
@@ -404,8 +441,9 @@ export async function settlePayrollInTee(input: {
   const privatePayrollPda = getPrivatePayrollPda(employeePda);
 
   const settleSalaryIx = await typedProgram.methods
-    .settleSalary(new BN(amountMicroUnits))
+    .paySalary(new BN(amountMicroUnits))
     .accounts({
+      crankOrEmployer: payer.publicKey,
       employer: payer.publicKey,
       employee: employeePda,
       privatePayroll: privatePayrollPda,
