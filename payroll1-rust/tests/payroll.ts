@@ -20,7 +20,7 @@ import {
 import type { Payroll } from "../target/types/payroll";
 
 const PROGRAM_ID = new PublicKey(
-  "EMM7YS2Jhzmu5fgF71vHty6P2tP7dErENL6tp3YppAYR"
+  "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6"
 );
 const DEVNET_RPC = "https://api.devnet.solana.com";
 const TEE_URL = "https://devnet-tee.magicblock.app";
@@ -343,8 +343,8 @@ describe("payroll devnet e2e", function () {
 
     await sleep(2_000);
 
-    const paySalarySig = await teeProgram.methods
-      .paySalary()
+    const checkpointSig = await teeProgram.methods
+      .checkpointAccrual()
       .accountsPartial({
         crankOrEmployer: employer.publicKey,
         employer: employer.publicKey,
@@ -360,7 +360,7 @@ describe("payroll devnet e2e", function () {
     );
     assert.isNotNull(
       accruedPrivateInfo,
-      "Private payroll state should still exist after pay_salary"
+      "Private payroll state should still exist after checkpoint_accrual"
     );
 
     const accruedPrivateState = decodePrivatePayrollState(
@@ -369,13 +369,14 @@ describe("payroll devnet e2e", function () {
     assert.equal(accruedPrivateState.status, 1);
     assert.isTrue(
       accruedPrivateState.accruedUnpaidMicro > BigInt(0),
-      "Accrued unpaid should increase after pay_salary"
+      "Accrued unpaid should increase after checkpoint_accrual"
     );
 
     const settleAmount = accruedPrivateState.accruedUnpaidMicro;
     const settleSalarySig = await teeProgram.methods
-      .settleSalary(new BN(settleAmount.toString()))
+      .paySalary(new BN(settleAmount.toString()))
       .accountsPartial({
+        crankOrEmployer: employer.publicKey,
         employer: employer.publicKey,
         employee: employeePda,
         privatePayroll: privatePayrollPda,
@@ -459,7 +460,7 @@ describe("payroll devnet e2e", function () {
     console.log("delegate bundle:", delegateBundleSig);
     console.log("initialize_private_payroll:", initializePrivatePayrollSig);
     console.log("resume_stream:", resumeStreamSig);
-    console.log("pay_salary:", paySalarySig);
+    console.log("checkpoint_accrual:", checkpointSig);
     console.log("settle_salary:", settleSalarySig);
     console.log("commit_employee:", commitEmployeeSig);
     console.log("undelegate_employee:", undelegateEmployeeSig);

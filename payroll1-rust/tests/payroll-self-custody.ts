@@ -13,7 +13,7 @@ import {
 import type { Payroll } from "../target/types/payroll";
 
 const PROGRAM_ID = new PublicKey(
-  "EMM7YS2Jhzmu5fgF71vHty6P2tP7dErENL6tp3YppAYR"
+  "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6"
 );
 const DEVNET_RPC = "https://api.devnet.solana.com";
 const TEE_URL = "https://devnet-tee.magicblock.app";
@@ -334,9 +334,8 @@ describe("payroll self-custodial devnet e2e", function () {
     await sleep(2_000);
 
     await teeProgram.methods
-      .paySalary()
+      .checkpointAccrual()
       .accountsPartial({
-        crankOrEmployer: employer.publicKey,
         employer: employer.publicKey,
         employee: employeePda,
         privatePayroll: privatePayrollPda,
@@ -350,8 +349,9 @@ describe("payroll self-custodial devnet e2e", function () {
     assert.isTrue(accruedState.accruedUnpaidMicro > BigInt(0));
 
     await teeProgram.methods
-      .settleSalary(new BN(accruedState.accruedUnpaidMicro.toString()))
+      .paySalary(new BN(accruedState.accruedUnpaidMicro.toString()))
       .accountsPartial({
+        crankOrEmployer: employer.publicKey,
         employer: employer.publicKey,
         employee: employeePda,
         privatePayroll: privatePayrollPda,

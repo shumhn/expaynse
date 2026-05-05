@@ -49,11 +49,10 @@ async function runCrank() {
       // 1. TEE State Accrual (Anchor Contract)
       // We manually construct the transaction to securely bypass base-chain preflight and target the TEE RPC.
       const paySalaryIx = await program.methods
-        .paySalary()
+        .checkpointAccrual()
         .accountsPartial({
           employer: crankSigner.publicKey,
           employee: employeePda,
-          crankOrEmployer: crankSigner.publicKey,
         })
         .instruction();
 

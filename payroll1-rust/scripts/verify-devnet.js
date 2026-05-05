@@ -8,15 +8,22 @@ const {
   getAuthToken,
   createDelegatePermissionInstruction,
   permissionPdaFromAccount,
+  MAGIC_PROGRAM_ID,
   PERMISSION_PROGRAM_ID,
 } = require("@magicblock-labs/ephemeral-rollups-sdk");
 
 const PROGRAM_ID = new web3.PublicKey(
-  "EMM7YS2Jhzmu5fgF71vHty6P2tP7dErENL6tp3YppAYR"
+  "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6"
 );
 const DEVNET_RPC = "https://api.devnet.solana.com";
 const TEE_URL = "https://devnet-tee.magicblock.app";
 const EMPLOYEE_SEED = "employee";
+const DEVNET_USDC = new web3.PublicKey(
+  "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+);
+const MAGIC_VAULT = new web3.PublicKey(
+  "MagicVau1t999999999999999999999999999999999"
+);
 const DEVNET_TEE_VALIDATOR = new web3.PublicKey(
   "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo"
 );
@@ -31,12 +38,12 @@ function loadKeypair() {
   return web3.Keypair.fromSecretKey(secret);
 }
 
-function getEmployeePda(employerPubkey, employeePubkey) {
+function getEmployeePda(employerPubkey, streamId) {
   const [pda] = web3.PublicKey.findProgramAddressSync(
     [
       Buffer.from(EMPLOYEE_SEED),
       employerPubkey.toBuffer(),
-      employeePubkey.toBuffer(),
+      streamId,
     ],
     PROGRAM_ID
   );
@@ -135,6 +142,8 @@ async function sendTeeTransaction(connection, wallet, tx) {
 async function main() {
   const employer = loadKeypair();
   const employeeWallet = web3.Keypair.generate().publicKey;
+  const streamId = web3.Keypair.generate().publicKey.toBuffer();
+  const streamSeedArg = Array.from(streamId);
 
   const baseConnection = new web3.Connection(DEVNET_RPC, "confirmed");
   const baseWallet = new anchor.Wallet(employer);
@@ -145,12 +154,13 @@ async function main() {
   const idl = await fetchIdl(baseProvider);
   const baseProgram = new anchor.Program(idl, baseProvider);
 
-  const employeePda = getEmployeePda(employer.publicKey, employeeWallet);
+  const employeePda = getEmployeePda(employer.publicKey, streamId);
 
   console.log("=== Devnet Payroll Verification ===");
   console.log("Program:", PROGRAM_ID.toBase58());
   console.log("Employer:", employer.publicKey.toBase58());
   console.log("Employee wallet:", employeeWallet.toBase58());
+  console.log("Stream id:", streamId.toString("hex"));
   console.log("Employee PDA:", employeePda.toBase58());
 
   console.log("\n[1/7] Ensuring employer has devnet SOL...");
@@ -171,9 +181,11 @@ async function main() {
 
   console.log("\n[2/7] Creating public employee payroll anchor on base...");
   const createSig = await baseProgram.methods
-    .createEmployee(employeeWallet)
+    .createEmployee(streamSeedArg)
     .accounts({
+      employee: employeePda,
       employer: employer.publicKey,
+      systemProgram: web3.SystemProgram.programId,
     })
     .signers([employer])
     .rpc();
@@ -182,10 +194,7 @@ async function main() {
   const createdEmployee = await baseProgram.account.employee.fetch(employeePda);
   console.log("Created public employee anchor:", {
     employer: createdEmployee.employer.toBase58(),
-    employee: createdEmployee.employee.toBase58(),
-    status: createdEmployee.status,
-    version: createdEmployee.version.toString(),
-    lastCheckpointTs: createdEmployee.lastCheckpointTs.toString(),
+    streamId: Buffer.from(createdEmployee.streamId).toString("hex"),
   });
 
   console.log("\n[3/7] Authenticating against devnet TEE...");
@@ -211,13 +220,13 @@ async function main() {
   const permissionPda = permissionPdaFromAccount(employeePda);
 
   const createPermissionSig = await baseProgram.methods
-    .createPermission(employeeWallet)
+    .createPermission(streamSeedArg, employeeWallet)
     .accounts({
       employee: employeePda,
       employer: employer.publicKey,
-      employeeSigner: employeeWallet,
       permission: permissionPda,
       permissionProgram: PERMISSION_PROGRAM_ID,
+      systemProgram: web3.SystemProgram.programId,
     })
     .signers([employer])
     .rpc();
@@ -234,7 +243,7 @@ async function main() {
   });
 
   const delegateEmployeeIx = await baseProgram.methods
-    .delegateEmployee(employeeWallet)
+    .delegateEmployee(streamSeedArg)
     .accounts({
       employer: employer.publicKey,
       employee: employeePda,
@@ -259,11 +268,19 @@ async function main() {
   );
 
   const initPrivateSig = await teeProgram.methods
-    .initializePrivatePayroll(new anchor.BN(1000))
+    .initializePrivatePayroll(
+      new anchor.BN(1000),
+      employeeWallet,
+      DEVNET_USDC,
+      employer.publicKey,
+      employer.publicKey
+    )
     .accounts({
       employer: employer.publicKey,
       employee: employeePda,
       privatePayroll: privatePayrollPda,
+      vault: MAGIC_VAULT,
+      magicProgram: MAGIC_PROGRAM_ID,
     })
     .signers([employer])
     .rpc();
@@ -271,22 +288,24 @@ async function main() {
 
   await sleep(2000);
 
-  console.log("\n[6/7] Executing pay_salary on the TEE...");
+  console.log("\n[6/7] Executing checkpoint_accrual on the TEE...");
   await sleep(2000);
 
   const paySalaryIx = await teeProgram.methods
-    .paySalary()
+    .checkpointAccrual()
     .accountsPartial({
       employer: employer.publicKey,
-      crankOrEmployer: employer.publicKey,
       employee: employeePda,
       privatePayroll: privatePayrollPda,
+      permission: permissionPda,
+      vault: MAGIC_VAULT,
+      magicProgram: MAGIC_PROGRAM_ID,
     })
     .instruction();
 
   const teePayTx = new web3.Transaction().add(paySalaryIx);
   const teePaySig = await sendTeeTransaction(teeConnection, employer, teePayTx);
-  console.log("pay_salary TEE signature:", teePaySig);
+  console.log("checkpoint_accrual TEE signature:", teePaySig);
 
   console.log("\n[6/7] Committing TEE state back to devnet...");
   const commitIx = await teeProgram.methods
@@ -294,6 +313,7 @@ async function main() {
     .accountsPartial({
       employer: employer.publicKey,
       employee: employeePda,
+      magicProgram: MAGIC_PROGRAM_ID,
     })
     .instruction();
 
@@ -308,10 +328,7 @@ async function main() {
   );
   console.log("Employee public checkpoint after commit:", {
     employer: committedEmployee.employer.toBase58(),
-    employee: committedEmployee.employee.toBase58(),
-    status: committedEmployee.status,
-    version: committedEmployee.version.toString(),
-    lastCheckpointTs: committedEmployee.lastCheckpointTs.toString(),
+    streamId: Buffer.from(committedEmployee.streamId).toString("hex"),
   });
 
   console.log("\n[7/7] Undelegating employee PDA from the TEE...");
@@ -346,22 +363,10 @@ async function main() {
   console.log("\n=== Verification Summary ===");
   console.log("create_employee:", createSig);
   console.log("delegate bundle:", delegateSig);
-  console.log("TEE pay_salary:", teePaySig);
+  console.log("TEE checkpoint_accrual:", teePaySig);
   console.log("TEE commit_employee:", commitSig);
   console.log("TEE undelegate_employee:", undelegateSig);
-
-  if (
-    !committedEmployee.totalPaid ||
-    committedEmployee.totalPaid.eq(new anchor.BN(0))
-  ) {
-    console.warn(
-      "\nWarning: total_paid is still 0 on base after commit. The flow executed, but state may not have had enough time to accrue or the delegated session may need deeper inspection."
-    );
-  } else {
-    console.log(
-      `\nSuccess: total_paid committed back to base as ${committedEmployee.totalPaid.toString()}`
-    );
-  }
+  console.log("\nSuccess: verifier completed create, permission, delegate, checkpoint, commit, and undelegate.");
 }
 
 main().catch((err) => {

@@ -35,7 +35,7 @@ async function main() {
   // Pay them 1000 lamports / second
   const initTx = await client.createEmployee(employer, streamId, 1000);
   console.log(
-    `   ✅ Created Employee on Base: https://explorer.solana.com/tx/${initTx}?cluster=devnet`
+    `   ✅ Created Employee on Base: https://solscan.io/tx/${initTx}?cluster=devnet`
   );
 
   // 3. Delegate into TEE!
@@ -44,7 +44,7 @@ async function main() {
   );
   const delegateTx = await client.delegateEmployeeToTee(employer, streamId);
   console.log(
-    `   ✅ Delegated! Privacy enforced: https://explorer.solana.com/tx/${delegateTx}?cluster=devnet`
+    `   ✅ Delegated! Privacy enforced: https://solscan.io/tx/${delegateTx}?cluster=devnet`
   );
 
   // 4. Fund Payroll inside the TEE using Private Payments
