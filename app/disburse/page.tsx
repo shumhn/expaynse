@@ -55,6 +55,17 @@ import {
   payoutModeSummary,
   type PayrollPayoutMode,
 } from "@/lib/payroll-payout-mode";
+import {
+  DEFAULT_CHECKPOINT_CRANK_INTERVAL_MS,
+  DEFAULT_CHECKPOINT_CRANK_ITERATIONS,
+} from "@/lib/server/checkpoint-crank";
+import {
+  CHECKPOINT_STALE_GRACE_MS,
+  deriveObservedCheckpointCrankStatus,
+  isCheckpointSyncRunning,
+  isCheckpointTimestampFresh,
+  type CheckpointCrankStatus,
+} from "@/lib/checkpoint-sync";
 interface ManagedEmployee {
   id: string;
   employerWallet: string;
@@ -70,11 +81,18 @@ interface ManagedEmployee {
   monthlySalaryUsd?: number;
   startDate?: string | null;
   privateRecipientInitializedAt?: string | null;
+  privateRecipientInitStatus?: "pending" | "processing" | "confirmed" | "failed";
+  privateRecipientInitRequestedAt?: string | null;
+  privateRecipientInitLastAttemptAt?: string | null;
+  privateRecipientInitConfirmedAt?: string | null;
+  privateRecipientInitTxSignature?: string | null;
+  privateRecipientInitError?: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 type StreamStatus = "active" | "paused" | "stopped";
+type PrivateInitStatus = "pending" | "processing" | "confirmed" | "failed";
 
 interface PayrollStream {
   id: string;
@@ -91,7 +109,7 @@ interface PayrollStream {
   recipientPrivateInitializedAt?: string | null;
   checkpointCrankTaskId?: string | null;
   checkpointCrankSignature?: string | null;
-  checkpointCrankStatus?: "idle" | "pending" | "active" | "failed" | "stopped";
+  checkpointCrankStatus?: CheckpointCrankStatus;
   checkpointCrankUpdatedAt?: string | null;
   lastPaidAt: string | null;
   totalPaid: number;
@@ -116,6 +134,8 @@ interface PrivatePayrollStateResponse {
     privatePayrollPda: string | null;
     permissionPda: string | null;
     delegatedAt: string | null;
+    checkpointCrankStatus?: CheckpointCrankStatus | null;
+    checkpointCrankUpdatedAt?: string | null;
     lastPaidAt: string | null;
     totalPaid: number;
   };
@@ -130,6 +150,8 @@ interface PrivatePayrollStateResponse {
     ratePerSecondMicro: string;
     lastAccrualTimestamp: string;
     accruedUnpaidMicro: string;
+    rawClaimableAmountMicro: string;
+    pendingAccrualMicro: string;
     totalPaidPrivateMicro: string;
     effectiveClaimableAmountMicro: string;
     monthlyCapUsd: number | null;
@@ -158,6 +180,53 @@ interface OnboardTransactionsResponse {
       transactionBase64: string;
       sendTo: "ephemeral";
     };
+    resumeStream?: {
+      transactionBase64: string;
+      sendTo: "ephemeral";
+    };
+  };
+}
+
+function resolvePrivateInitStatus(
+  employee: ManagedEmployee,
+  stream: PayrollStream | null | undefined,
+): PrivateInitStatus {
+  if (
+    stream?.recipientPrivateInitializedAt ||
+    employee.privateRecipientInitializedAt ||
+    employee.privateRecipientInitConfirmedAt
+  ) {
+    return "confirmed";
+  }
+
+  return employee.privateRecipientInitStatus ?? "pending";
+}
+
+function getPrivateInitBadge(status: PrivateInitStatus) {
+  if (status === "confirmed") {
+    return {
+      label: "INIT READY",
+      className: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+    };
+  }
+
+  if (status === "processing") {
+    return {
+      label: "INIT SYNCING",
+      className: "bg-blue-500/10 text-blue-300 border-blue-400/30",
+    };
+  }
+
+  if (status === "failed") {
+    return {
+      label: "INIT FAILED",
+      className: "bg-rose-500/10 text-rose-300 border-rose-500/30",
+    };
+  }
+
+  return {
+    label: "INIT PENDING",
+    className: "bg-amber-500/10 text-amber-400 border-amber-300",
   };
 }
 
@@ -177,11 +246,12 @@ interface TickBuildResult {
   amountMicro?: number;
   employeePda?: string;
   privatePayrollPda?: string;
+  /** Signature of the treasury→employee transfer (already executed server-side) */
+  transferSignature?: string;
+  transferSendTo?: string;
+  accountingOnly?: boolean;
+  settlementAlreadyApplied?: boolean;
   transactions?: {
-    transfer?: {
-      transactionBase64: string;
-      sendTo: string;
-    };
     settleSalary?: {
       transactionBase64: string;
       sendTo: "ephemeral";
@@ -337,7 +407,6 @@ const STREAM_STATUS_PRIORITY: Record<StreamStatus, number> = {
   paused: 2,
   stopped: 1,
 };
-
 type DataSourceBadge = "live-per" | "backend" | "unavailable";
 
 function sourceBadgeMeta(source: DataSourceBadge) {
@@ -364,6 +433,22 @@ function getEffectiveStreamStatus(
   preview?: PrivatePayrollStateResponse | null,
 ): StreamStatus | null {
   return preview?.state.status ?? preview?.stream.status ?? stream?.status ?? null;
+}
+
+function isCheckpointStateFresh(
+  stream: PayrollStream | null | undefined,
+  preview: PrivatePayrollStateResponse | null | undefined,
+  nowMs: number,
+) {
+  if (!stream || !isCheckpointSyncRunning(stream.checkpointCrankStatus) || !preview) {
+    return false;
+  }
+
+  return isCheckpointTimestampFresh(
+    preview.state.lastAccrualTimestamp,
+    nowMs,
+    CHECKPOINT_STALE_GRACE_MS,
+  );
 }
 
 function isMissingPrivateStateMessage(message: string) {
@@ -393,22 +478,19 @@ function EmployerPageContent() {
   );
   const [onboardingStream, setOnboardingStream] = useState<string | null>(null);
   const [restartingStream, setRestartingStream] = useState<string | null>(null);
+  const [checkpointingStream, setCheckpointingStream] = useState<string | null>(
+    null,
+  );
   const [refreshingPreview, setRefreshingPreview] = useState<string | null>(
     null,
   );
   const [runningTick, setRunningTick] = useState(false);
-  const [runningTickStream, setRunningTickStream] = useState<string | null>(
-    null,
-  );
-  const [settlingTickStream, setSettlingTickStream] = useState<string | null>(
-    null,
-  );
-  const [privateStates, setPrivateStates] = useState<
-    Record<string, PrivatePayrollStateResponse>
-  >({});
-  const [missingPrivateStates, setMissingPrivateStates] = useState<
-    Record<string, boolean>
-  >({});
+  const [runningTickStream, setRunningTickStream] = useState<string | null>(null);
+  const [settlingTickStream, setSettlingTickStream] = useState<string | null>(null);
+  const [privateStates, setPrivateStates] = useState<Record<string, PrivatePayrollStateResponse>>({});
+  const [missingPrivateStates, setMissingPrivateStates] = useState<Record<string, boolean>>({});
+  const missingPrivateStatesRef = useRef<Record<string, boolean>>({});
+  const [streamsNeedingRecovery, setStreamsNeedingRecovery] = useState<Record<string, TickBuildResult>>({});
   const [newEmployeeName, setNewEmployeeName] = useState("");
   const [newEmployeeWallet, setNewEmployeeWallet] = useState("");
   const [newEmployeeDepartment, setNewEmployeeDepartment] = useState<
@@ -512,6 +594,11 @@ function EmployerPageContent() {
     [managedEmployees, focusedEmployeeId],
   );
 
+  const focusedStreamId = useMemo(() => {
+    if (!focusedEmployeeId) return null;
+    return employeeStreamMap.get(focusedEmployeeId)?.id ?? null;
+  }, [employeeStreamMap, focusedEmployeeId]);
+
   const resolveStatusWithMissing = useCallback(
     (
       stream: PayrollStream | null | undefined,
@@ -589,6 +676,26 @@ function EmployerPageContent() {
     [managedEmployees, focusedEmployeeId],
   );
 
+  const streamsWithActiveCheckpointSync = useMemo(
+    () =>
+      streams.filter((stream) => {
+        if (
+          !isCheckpointSyncRunning(stream.checkpointCrankStatus) ||
+          !stream.privatePayrollPda ||
+          !stream.employeePda
+        ) {
+          return false;
+        }
+
+        if (focusedEmployeeId) {
+          return stream.id === focusedStreamId;
+        }
+
+        return true;
+      }),
+    [streams, focusedEmployeeId, focusedStreamId],
+  );
+
   const monthlyLiability = useMemo(
     () =>
       visibleSalaryAllocationRows.reduce(
@@ -597,6 +704,7 @@ function EmployerPageContent() {
       ),
     [visibleSalaryAllocationRows],
   );
+
 
   const activeDailyBurn = useMemo(
     () =>
@@ -617,20 +725,24 @@ function EmployerPageContent() {
 
   const readinessSummary = useMemo(() => {
     let perMissing = 0;
-    let recipientMissing = 0;
+    let recipientPending = 0;
+    let recipientFailed = 0;
     let paused = 0;
 
     for (const employee of visibleManagedEmployees) {
       const stream = employeeStreamMap.get(employee.id) ?? null;
       const preview = stream ? (privateStates[stream.id] ?? null) : null;
       const status = resolveStatusWithMissing(stream, preview);
+      const initStatus = resolvePrivateInitStatus(employee, stream);
 
       if (!stream?.employeePda || !stream?.privatePayrollPda || !stream?.permissionPda) {
         perMissing += 1;
       }
 
-      if (!stream?.recipientPrivateInitializedAt && !employee.privateRecipientInitializedAt) {
-        recipientMissing += 1;
+      if (initStatus === "failed") {
+        recipientFailed += 1;
+      } else if (initStatus !== "confirmed") {
+        recipientPending += 1;
       }
 
       if (status === "paused") {
@@ -640,7 +752,8 @@ function EmployerPageContent() {
 
     return {
       perMissing,
-      recipientMissing,
+      recipientPending,
+      recipientFailed,
       paused,
     };
   }, [visibleManagedEmployees, employeeStreamMap, privateStates, resolveStatusWithMissing]);
@@ -694,6 +807,10 @@ function EmployerPageContent() {
   useEffect(() => {
     void refreshMagicBlockHealth();
   }, [refreshMagicBlockHealth]);
+
+  useEffect(() => {
+    missingPrivateStatesRef.current = missingPrivateStates;
+  }, [missingPrivateStates]);
 
   const getOrFetchToken = useCallback(async () => {
     if (tokenCache.current && !isJwtExpired(tokenCache.current)) {
@@ -781,7 +898,7 @@ function EmployerPageContent() {
 
   const waitForEmployeeOwnership = useCallback(async (employeePda: string) => {
     const payrollProgramId = new PublicKey(
-      "EMM7YS2Jhzmu5fgF71vHty6P2tP7dErENL6tp3YppAYR",
+      "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6",
     );
     const employeeAddress = new PublicKey(employeePda);
     const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
@@ -875,8 +992,8 @@ function EmployerPageContent() {
           prev.map((existing) =>
             existing.id === stream.id
               ? {
-                ...existing,
-                status: stateResponse.stream.status,
+                  ...existing,
+                  status: stateResponse.stream.status,
                 employeePda:
                   stateResponse.stream.employeePda ?? existing.employeePda,
                 privatePayrollPda:
@@ -885,11 +1002,22 @@ function EmployerPageContent() {
                 permissionPda:
                   stateResponse.stream.permissionPda ??
                   existing.permissionPda,
-                delegatedAt:
-                  stateResponse.stream.delegatedAt ?? existing.delegatedAt,
-                lastPaidAt: stateResponse.stream.lastPaidAt,
-                totalPaid: stateResponse.stream.totalPaid,
-              }
+                  delegatedAt:
+                    stateResponse.stream.delegatedAt ?? existing.delegatedAt,
+                  checkpointCrankStatus:
+                    deriveObservedCheckpointCrankStatus({
+                      currentStatus:
+                        stateResponse.stream.checkpointCrankStatus ??
+                        existing.checkpointCrankStatus,
+                      lastAccrualTimestamp:
+                        stateResponse.state.lastAccrualTimestamp,
+                    }) ?? existing.checkpointCrankStatus,
+                  checkpointCrankUpdatedAt:
+                    stateResponse.stream.checkpointCrankUpdatedAt ??
+                    existing.checkpointCrankUpdatedAt,
+                  lastPaidAt: stateResponse.stream.lastPaidAt,
+                  totalPaid: stateResponse.stream.totalPaid,
+                }
               : existing,
           ),
         );
@@ -945,6 +1073,22 @@ function EmployerPageContent() {
     },
     [walletAddress, getOrFetchToken],
   );
+
+  useEffect(() => {
+    if (!walletAddress || streamsWithActiveCheckpointSync.length === 0) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void Promise.allSettled(
+        streamsWithActiveCheckpointSync.map((stream) =>
+          fetchPrivatePreview(stream, { silent: true }),
+        ),
+      );
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [walletAddress, streamsWithActiveCheckpointSync, fetchPrivatePreview]);
 
   const fetchPayrollConfig = useCallback(async () => {
     if (!walletAddress) {
@@ -1046,9 +1190,27 @@ function EmployerPageContent() {
       });
 
       if (tokenCache.current && !isJwtExpired(tokenCache.current)) {
+        const previewPrefetchStreams = nextStreams.filter((stream) => {
+          if (!stream.privatePayrollPda) {
+            return false;
+          }
+
+          if (
+            missingPrivateStatesRef.current[stream.id] &&
+            stream.status === "stopped"
+          ) {
+            return false;
+          }
+
+          if (focusedEmployeeId) {
+            return stream.id === focusedStreamId;
+          }
+
+          return true;
+        });
+
         await Promise.all(
-          nextStreams
-            .filter((stream) => !!stream.privatePayrollPda)
+          previewPrefetchStreams
             .map(async (stream) => {
               try {
                 const response = await fetch(
@@ -1102,8 +1264,8 @@ function EmployerPageContent() {
                   prev.map((existing) =>
                     existing.id === stream.id
                       ? {
-                        ...existing,
-                        status: stateResponse.stream.status,
+                          ...existing,
+                          status: stateResponse.stream.status,
                         employeePda:
                           stateResponse.stream.employeePda ??
                           existing.employeePda,
@@ -1113,12 +1275,23 @@ function EmployerPageContent() {
                         permissionPda:
                           stateResponse.stream.permissionPda ??
                           existing.permissionPda,
-                        delegatedAt:
-                          stateResponse.stream.delegatedAt ??
-                          existing.delegatedAt,
-                        lastPaidAt: stateResponse.stream.lastPaidAt,
-                        totalPaid: stateResponse.stream.totalPaid,
-                      }
+                          delegatedAt:
+                            stateResponse.stream.delegatedAt ??
+                            existing.delegatedAt,
+                          checkpointCrankStatus:
+                            deriveObservedCheckpointCrankStatus({
+                              currentStatus:
+                                stateResponse.stream.checkpointCrankStatus ??
+                                existing.checkpointCrankStatus,
+                              lastAccrualTimestamp:
+                                stateResponse.state.lastAccrualTimestamp,
+                            }) ?? existing.checkpointCrankStatus,
+                          checkpointCrankUpdatedAt:
+                            stateResponse.stream.checkpointCrankUpdatedAt ??
+                            existing.checkpointCrankUpdatedAt,
+                          lastPaidAt: stateResponse.stream.lastPaidAt,
+                          totalPaid: stateResponse.stream.totalPaid,
+                        }
                       : existing,
                   ),
                 );
@@ -1135,7 +1308,7 @@ function EmployerPageContent() {
     } finally {
       setLoadingPayrollConfig(false);
     }
-  }, [walletAddress, signMessage]);
+  }, [walletAddress, signMessage, focusedEmployeeId, focusedStreamId]);
 
   const fetchCashoutRequests = useCallback(async () => {
     if (!walletAddress) {
@@ -1149,10 +1322,14 @@ function EmployerPageContent() {
 
     setLoadingCashoutRequests(true);
     try {
+      const cashoutPath =
+        focusedStreamId
+          ? `/api/cashout-requests?scope=employer&employerWallet=${walletAddress}&streamId=${focusedStreamId}`
+          : `/api/cashout-requests?scope=employer&employerWallet=${walletAddress}`;
       const response = await walletAuthenticatedFetch({
         wallet: walletAddress,
         signMessage,
-        path: `/api/cashout-requests?scope=employer&employerWallet=${walletAddress}`,
+        path: cashoutPath,
       });
 
       const json = (await response.json()) as {
@@ -1172,11 +1349,30 @@ function EmployerPageContent() {
     } finally {
       setLoadingCashoutRequests(false);
     }
-  }, [walletAddress, signMessage]);
+  }, [walletAddress, signMessage, focusedStreamId]);
 
   useEffect(() => {
     fetchPayrollConfig();
   }, [fetchPayrollConfig]);
+
+  useEffect(() => {
+    if (!walletAddress || !signMessage) return;
+    const employeesToWatch = focusedEmployeeId
+      ? managedEmployees.filter((employee) => employee.id === focusedEmployeeId)
+      : managedEmployees;
+    const hasInitInFlight = employeesToWatch.some((employee) => {
+      const status = employee.privateRecipientInitStatus ?? "pending";
+      return status === "pending" || status === "processing";
+    });
+    if (!hasInitInFlight) return;
+
+    const timer = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void fetchPayrollConfig();
+    }, 4_000);
+
+    return () => window.clearInterval(timer);
+  }, [fetchPayrollConfig, managedEmployees, signMessage, walletAddress, focusedEmployeeId]);
 
   useEffect(() => {
     void fetchCashoutRequests();
@@ -1188,11 +1384,19 @@ function EmployerPageContent() {
       return;
     }
 
+    if (focusedEmployeeId) {
+      return;
+    }
+
     void refreshTreasuryPrivateBalance({ silent: true });
-  }, [walletAddress, refreshTreasuryPrivateBalance]);
+  }, [walletAddress, refreshTreasuryPrivateBalance, focusedEmployeeId]);
 
   useEffect(() => {
     if (!walletAddress) {
+      return;
+    }
+
+    if (focusedEmployeeId) {
       return;
     }
 
@@ -1217,7 +1421,7 @@ function EmployerPageContent() {
     }, 15_000);
 
     return () => window.clearInterval(timer);
-  }, [walletAddress, refreshTreasuryPrivateBalance]);
+  }, [walletAddress, refreshTreasuryPrivateBalance, focusedEmployeeId]);
 
   useEffect(() => {
     if (!walletAddress) {
@@ -1236,7 +1440,9 @@ function EmployerPageContent() {
         "active" &&
         !!stream.privatePayrollPda &&
         !!stream.employeePda &&
-        !!stream.delegatedAt,
+        !!stream.delegatedAt &&
+        !missingPrivateStates[stream.id] &&
+        (!focusedEmployeeId || stream.id === focusedStreamId),
     );
 
     if (activeStreams.length === 0) {
@@ -1260,7 +1466,7 @@ function EmployerPageContent() {
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [walletAddress, streams, privateStates, fetchPrivatePreview]);
+  }, [walletAddress, streams, privateStates, fetchPrivatePreview, missingPrivateStates, focusedEmployeeId, focusedStreamId]);
 
   const handleAddManagedEmployee = useCallback(async () => {
     if (!walletAddress) {
@@ -1305,7 +1511,19 @@ function EmployerPageContent() {
         throw new Error(json.error || "Failed to create employee");
       }
 
-      toast.success("Employee added to payroll roster");
+      if (json.employee?.privateRecipientInitStatus === "confirmed") {
+        toast.success("Employee added and private init completed.");
+      } else if (json.employee?.privateRecipientInitStatus === "failed") {
+        toast.warning(
+          json.employee.privateRecipientInitError
+            ? `Employee added, but private init failed: ${json.employee.privateRecipientInitError}. Ask the employee to open Claim > Withdraw and initialize their private account.`
+            : "Employee added, but private init failed. Ask the employee to open Claim > Withdraw and initialize their private account.",
+        );
+      } else {
+        toast.success(
+          "Employee added. Auto-init is syncing; if it does not finish, the employee can self-initialize from Claim > Withdraw.",
+        );
+      }
       setNewEmployeeName("");
       setNewEmployeeWallet("");
       setNewEmployeeDepartment(DEPARTMENT_OPTIONS[0]);
@@ -1463,19 +1681,19 @@ function EmployerPageContent() {
         );
       }
 
-      const buildResponse = await fetch("/api/streams/checkpoint-crank", {
+      const buildResponse = await walletAuthenticatedFetch({
+        wallet: args.employerWallet,
+        signMessage,
+        path: "/api/streams/checkpoint-crank",
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+        body: {
           employerWallet: args.employerWallet,
           streamId: args.streamId,
           teeAuthToken: args.teeAuthToken,
           mode: args.mode,
           executionIntervalMillis: args.executionIntervalMillis,
           iterations: args.iterations,
-        }),
+        },
       });
 
       const buildJson = (await buildResponse.json()) as
@@ -1503,19 +1721,19 @@ function EmployerPageContent() {
         },
       );
 
-      const finalizeResponse = await fetch("/api/streams/checkpoint-crank", {
+      const finalizeResponse = await walletAuthenticatedFetch({
+        wallet: args.employerWallet,
+        signMessage,
+        path: "/api/streams/checkpoint-crank",
         method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+        body: {
           employerWallet: args.employerWallet,
           streamId: args.streamId,
           mode: args.mode,
           taskId: crankBuild.taskId,
           signature,
           status: args.mode === "schedule" ? "active" : "stopped",
-        }),
+        },
       });
 
       const finalizeJson = (await finalizeResponse.json()) as {
@@ -1535,6 +1753,117 @@ function EmployerPageContent() {
       };
     },
     [publicKey, signTransaction, signMessage, getTeeRpcUrl],
+  );
+
+  const handleCheckpointCrank = useCallback(
+    async (stream: PayrollStream, mode: "schedule" | "cancel") => {
+      if (!walletAddress) {
+        toast.error("Connect your employer wallet first");
+        return;
+      }
+
+      setCheckpointingStream(stream.id);
+      try {
+        const teeAuthToken = await getOrFetchToken();
+        await buildCheckpointCrankAndFinalize({
+          employerWallet: walletAddress,
+          streamId: stream.id,
+          teeAuthToken,
+          mode,
+          executionIntervalMillis: DEFAULT_CHECKPOINT_CRANK_INTERVAL_MS,
+          iterations: DEFAULT_CHECKPOINT_CRANK_ITERATIONS,
+        });
+
+        toast.success(
+          mode === "schedule"
+            ? "Checkpoint sync scheduled on MagicBlock. It will show ticking once the TEE heartbeat advances."
+            : "Checkpoint sync stopped",
+        );
+
+        await Promise.allSettled([
+          fetchPayrollConfig(),
+          fetchPrivatePreview(stream, { silent: true }),
+        ]);
+      } catch (error: unknown) {
+        toast.error(
+          `Checkpoint sync ${mode === "schedule" ? "start" : "stop"} failed: ${
+            error instanceof Error ? error.message : "Unknown"
+          }`,
+        );
+      } finally {
+        setCheckpointingStream(null);
+      }
+    },
+    [
+      walletAddress,
+      getOrFetchToken,
+      buildCheckpointCrankAndFinalize,
+      fetchPayrollConfig,
+      fetchPrivatePreview,
+    ],
+  );
+
+  const handleRestartCheckpointCrank = useCallback(
+    async (stream: PayrollStream) => {
+      if (!walletAddress) {
+        toast.error("Connect your employer wallet first");
+        return;
+      }
+
+      setCheckpointingStream(stream.id);
+      try {
+        const teeAuthToken = await getOrFetchToken();
+        const needsCancelFirst =
+          !!stream.checkpointCrankTaskId ||
+          isCheckpointSyncRunning(stream.checkpointCrankStatus);
+
+        toast.info(
+          needsCancelFirst
+            ? "Approve 2 transactions to restart checkpoint sync and recover real-time TEE updates."
+            : "Approve 1 transaction to start checkpoint sync.",
+        );
+
+        if (needsCancelFirst) {
+          await buildCheckpointCrankAndFinalize({
+            employerWallet: walletAddress,
+            streamId: stream.id,
+            teeAuthToken,
+            mode: "cancel",
+          });
+        }
+
+        await buildCheckpointCrankAndFinalize({
+          employerWallet: walletAddress,
+          streamId: stream.id,
+          teeAuthToken,
+          mode: "schedule",
+          executionIntervalMillis: DEFAULT_CHECKPOINT_CRANK_INTERVAL_MS,
+          iterations: DEFAULT_CHECKPOINT_CRANK_ITERATIONS,
+        });
+
+        toast.success("Checkpoint sync restarted on MagicBlock");
+
+        await Promise.allSettled([
+          fetchPayrollConfig(),
+          fetchPrivatePreview(stream, { silent: true }),
+        ]);
+      } catch (error: unknown) {
+        toast.error(
+          `Checkpoint sync restart failed: ${
+            error instanceof Error ? error.message : "Unknown"
+          }`,
+        );
+      } finally {
+        setCheckpointingStream(null);
+      }
+    },
+    [
+      walletAddress,
+      getOrFetchToken,
+      buildCheckpointCrankAndFinalize,
+      fetchPayrollConfig,
+      fetchPrivatePreview,
+    ],
   );
 
   const handleResolveCashoutRequest = useCallback(
@@ -1655,8 +1984,11 @@ function EmployerPageContent() {
 
         const controlBuild = json as StreamControlBuildResponse;
 
+        const hasCommitTx = !!controlBuild.transactions.commitEmployee?.transactionBase64;
         toast.info(
-          "Approve 2 employer transactions to update the private rate",
+          hasCommitTx
+            ? "Approve 2 employer transactions to update the private rate"
+            : "Approve 1 employer transaction to update the private rate",
         );
 
         const controlSignature = await signAndSend(
@@ -1670,16 +2002,19 @@ function EmployerPageContent() {
           },
         );
 
-        const commitSignature = await signAndSend(
-          controlBuild.transactions.commitEmployee.transactionBase64,
-          signTransaction,
-          {
-            sendTo: controlBuild.transactions.commitEmployee.sendTo,
-            rpcUrl: getTeeRpcUrl(teeAuthToken),
-            signMessage,
-            publicKey,
-          },
-        );
+        let commitSignature: string | undefined;
+        if (hasCommitTx) {
+          commitSignature = await signAndSend(
+            controlBuild.transactions.commitEmployee.transactionBase64,
+            signTransaction,
+            {
+              sendTo: controlBuild.transactions.commitEmployee.sendTo,
+              rpcUrl: getTeeRpcUrl(teeAuthToken),
+              signMessage,
+              publicKey,
+            },
+          );
+        }
 
         const finalizeResponse = await fetch("/api/streams/control", {
           method: "PATCH",
@@ -1710,7 +2045,6 @@ function EmployerPageContent() {
 
         toast.success("Private payroll rate updated with employer wallet");
         await fetchPayrollConfig();
-        await fetchCashoutRequests();
         await fetchPrivatePreview({
           ...stream,
           ratePerSecond: currentRate,
@@ -1868,6 +2202,7 @@ function EmployerPageContent() {
             employerWallet: walletAddress,
             streamId: stream.id,
             action,
+            ratePerSecond: action === "resume" ? stream.ratePerSecond : undefined,
             teeAuthToken,
           }),
         });
@@ -1886,7 +2221,12 @@ function EmployerPageContent() {
 
         const controlBuild = json as StreamControlBuildResponse;
 
-        toast.info("Approve 2 employer transactions to control this stream");
+        const hasCommitTx = !!controlBuild.transactions.commitEmployee?.transactionBase64;
+        toast.info(
+          hasCommitTx
+            ? "Approve 2 employer transactions to control this stream"
+            : "Approve 1 employer transaction to control this stream",
+        );
 
         const controlSignature = await signAndSend(
           controlBuild.transactions.control.transactionBase64,
@@ -1899,16 +2239,19 @@ function EmployerPageContent() {
           },
         );
 
-        const commitSignature = await signAndSend(
-          controlBuild.transactions.commitEmployee.transactionBase64,
-          signTransaction,
-          {
-            sendTo: controlBuild.transactions.commitEmployee.sendTo,
-            rpcUrl: getTeeRpcUrl(teeAuthToken),
-            signMessage,
-            publicKey,
-          },
-        );
+        let commitSignature: string | undefined;
+        if (hasCommitTx) {
+          commitSignature = await signAndSend(
+            controlBuild.transactions.commitEmployee.transactionBase64,
+            signTransaction,
+            {
+              sendTo: controlBuild.transactions.commitEmployee.sendTo,
+              rpcUrl: getTeeRpcUrl(teeAuthToken),
+              signMessage,
+              publicKey,
+            },
+          );
+        }
 
         const finalizeResponse = await fetch("/api/streams/control", {
           method: "PATCH",
@@ -1919,6 +2262,7 @@ function EmployerPageContent() {
             employerWallet: walletAddress,
             streamId: stream.id,
             action,
+            ratePerSecond: action === "resume" ? stream.ratePerSecond : undefined,
             employeePda: controlBuild.employeePda,
             privatePayrollPda: controlBuild.privatePayrollPda,
             controlSignature,
@@ -1987,10 +2331,17 @@ function EmployerPageContent() {
                 streamId: stream.id,
                 teeAuthToken,
                 mode: "schedule",
-                executionIntervalMillis: 1000,
-                iterations: 999_999_999,
+                executionIntervalMillis: DEFAULT_CHECKPOINT_CRANK_INTERVAL_MS,
+                iterations: DEFAULT_CHECKPOINT_CRANK_ITERATIONS,
               });
-            } else if (action === "pause" || action === "stop") {
+            } else if (
+              (action === "pause" || action === "stop") &&
+              (isCheckpointSyncRunning(stream.checkpointCrankStatus) ||
+                !!stream.checkpointCrankTaskId)
+            ) {
+              toast.info(
+                "Approve 1 more transaction to stop checkpoint sync for this stream.",
+              );
               await buildCheckpointCrankAndFinalize({
                 employerWallet: walletAddress,
                 streamId: stream.id,
@@ -2009,7 +2360,6 @@ function EmployerPageContent() {
           } finally {
             await Promise.allSettled([
               fetchPayrollConfig(),
-              fetchCashoutRequests(),
               fetchPrivatePreview(
                 {
                   ...stream,
@@ -2284,16 +2634,16 @@ function EmployerPageContent() {
       try {
         const teeAuthToken = await getOrFetchToken();
 
-        const response = await fetch("/api/streams/onboard", {
+        const response = await walletAuthenticatedFetch({
+          wallet: walletAddress,
+          signMessage,
+          path: "/api/streams/onboard",
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
+          body: {
             employerWallet: walletAddress,
             streamId: stream.id,
             teeAuthToken,
-          }),
+          },
         });
 
         let json: OnboardTransactionsResponse | { error?: string; message?: string };
@@ -2327,13 +2677,13 @@ function EmployerPageContent() {
         const transactionCount = [
           onboarding.transactions.baseSetup,
           onboarding.transactions.initializePrivatePayroll,
+          onboarding.transactions.resumeStream,
         ].filter(Boolean).length;
 
-        if (transactionCount === 2) {
-          toast.info("Approve Step 1/2 (base setup), then Step 2/2 (PER init)");
-        } else {
+        if (transactionCount > 0) {
           toast.info(
             `Approve ${transactionCount} onboarding transaction${transactionCount === 1 ? "" : "s"} in your wallet`,
+            { id: "onboard-txns" }
           );
         }
 
@@ -2364,18 +2714,34 @@ function EmployerPageContent() {
           );
         }
 
-        const finalizeResponse = await fetch("/api/streams/onboard", {
+        if (onboarding.transactions.resumeStream) {
+          await signAndSend(
+            onboarding.transactions.resumeStream.transactionBase64,
+            signTransaction,
+            {
+              sendTo: onboarding.transactions.resumeStream.sendTo,
+              rpcUrl: getTeeRpcUrl(teeAuthToken),
+              signMessage,
+              publicKey,
+              retrySendCount: 3,
+              retryDelayMs: 5_000,
+            },
+          );
+        }
+
+        const finalizeResponse = await walletAuthenticatedFetch({
+          wallet: walletAddress,
+          signMessage,
+          path: "/api/streams/onboard",
           method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
+          body: {
             employerWallet: walletAddress,
             streamId: stream.id,
             employeePda: onboarding.employeePda,
             privatePayrollPda: onboarding.privatePayrollPda,
             permissionPda: onboarding.permissionPda,
-          }),
+            teeAuthToken,
+          },
         });
 
         const finalizeJson = (await finalizeResponse.json()) as {
@@ -2451,12 +2817,12 @@ function EmployerPageContent() {
           }
         }
 
-        const tickBuildResponse = await fetch("/api/payroll/tick", {
+        const tickBuildResponse = await walletAuthenticatedFetch({
+          path: `/api/payroll/tick?wallet=${walletAddress}`,
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
+          wallet: walletAddress,
+          signMessage,
+          body: {
             employerWallet: walletAddress,
             teeAuthToken,
             streamId: stream?.id,
@@ -2464,14 +2830,37 @@ function EmployerPageContent() {
             maxSettlementAmountMicro: options?.cashoutRequest
               ? Math.round(options.cashoutRequest.requestedAmount * 1_000_000)
               : options?.settlementAmountMicro,
-          }),
+          },
         });
 
         const tickBuildJson = (await tickBuildResponse.json()) as
           | TickBuildResponse
-          | { error?: string };
+          | { error?: string; needsRecovery?: boolean; results?: TickBuildResult[] };
 
         if (!tickBuildResponse.ok) {
+          if ("needsRecovery" in tickBuildJson && tickBuildJson.needsRecovery && Array.isArray(tickBuildJson.results)) {
+            const recoveryState: Record<string, TickBuildResult> = {};
+            for (const result of tickBuildJson.results) {
+              if (
+                result.streamId &&
+                typeof result.amountMicro === "number" &&
+                (result.transferSignature || result.accountingOnly)
+              ) {
+                recoveryState[result.streamId] = result;
+              }
+            }
+            setStreamsNeedingRecovery((prev) => ({ ...prev, ...recoveryState }));
+            setRunningTick(false);
+            setRunningTickStream(null);
+            setSettlingTickStream(null);
+            toast.error(
+              stream
+                ? "A previous payroll payment needs accounting sync. Use the Sync Payroll State button below; no new treasury transfer will be sent."
+                : "A previous payroll payment needs accounting sync. Open the affected payroll row and click Sync Payroll State.",
+            );
+            return;
+          }
+
           throw new Error(
             "error" in tickBuildJson
               ? tickBuildJson.error || "Failed to build payroll tick"
@@ -2494,8 +2883,8 @@ function EmployerPageContent() {
         const actionableResults = tickBuild.results.filter(
           (result) =>
             !result.skipped &&
-            result.transactions?.transfer &&
-            result.transactions?.settleSalary &&
+            (result.transferSignature || result.accountingOnly) &&
+            (result.transactions?.settleSalary || result.settlementAlreadyApplied) &&
             result.transactions?.commitEmployee &&
             typeof result.amountMicro === "number" &&
             result.employeePda &&
@@ -2511,8 +2900,13 @@ function EmployerPageContent() {
           return;
         }
 
+        const hasAccountingOnlyRepair = actionableResults.some(
+          (result) => result.accountingOnly,
+        );
         toast.info(
-          `Approve ${actionableResults.length * 3} settlement transaction(s) in your wallet`,
+          hasAccountingOnlyRepair
+            ? "Previous transfer found. Approve PER accounting sync; no new treasury transfer will be sent"
+            : "Treasury transfer complete. Approve settlement sync transaction(s) in your wallet",
         );
 
         const finalizedResults: Array<{
@@ -2529,8 +2923,9 @@ function EmployerPageContent() {
           transferSendTo?: string;
           employeePda: string;
           privatePayrollPda: string;
-          transferSignature: string;
-          settleSalarySignature: string;
+          transferSignature?: string;
+          accountingOnly?: boolean;
+          settleSalarySignature?: string;
           commitSignature: string;
         }> = [];
 
@@ -2542,41 +2937,28 @@ function EmployerPageContent() {
         }
 
         for (const result of actionableResults) {
-          let transferSignature: string;
-          try {
-            transferSignature = await signAndSend(
-              result.transactions!.transfer!.transactionBase64,
-              signTransaction,
-              {
-                sendTo: result.transactions!.transfer!.sendTo,
-                signMessage,
-                publicKey,
-              },
-            );
-          } catch (error: unknown) {
-            throw new Error(
-              `Run Tick failed at private transfer for ${result.employeeWallet}: ${error instanceof Error ? error.message : "Unknown error"
-              }`,
-            );
-          }
+          // Transfer is already executed server-side from Company Treasury
+          const transferSignature = result.transferSignature;
 
-          let settleSalarySignature: string;
-          try {
-            settleSalarySignature = await signAndSend(
-              result.transactions!.settleSalary!.transactionBase64,
-              signTransaction,
-              {
-                sendTo: result.transactions!.settleSalary!.sendTo,
-                rpcUrl: getTeeRpcUrl(teeAuthToken),
-                signMessage,
-                publicKey,
-              },
-            );
-          } catch (error: unknown) {
-            throw new Error(
-              `Run Tick failed at settleSalary for ${result.employeeWallet}: ${error instanceof Error ? error.message : "Unknown error"
-              }`,
-            );
+          let settleSalarySignature: string | undefined;
+          if (result.transactions!.settleSalary) {
+            try {
+              settleSalarySignature = await signAndSend(
+                result.transactions!.settleSalary.transactionBase64,
+                signTransaction,
+                {
+                  sendTo: result.transactions!.settleSalary.sendTo,
+                  rpcUrl: getTeeRpcUrl(teeAuthToken),
+                  signMessage,
+                  publicKey,
+                },
+              );
+            } catch (error: unknown) {
+              throw new Error(
+                `Run Tick failed at settleSalary for ${result.employeeWallet}: ${error instanceof Error ? error.message : "Unknown error"
+                }`,
+              );
+            }
           }
 
           let commitSignature: string;
@@ -2609,10 +2991,11 @@ function EmployerPageContent() {
             destinationWallet: result.destinationWallet,
             transferFromBalance: result.transferFromBalance,
             transferToBalance: result.transferToBalance,
-            transferSendTo: result.transactions?.transfer?.sendTo,
+            transferSendTo: result.transferSendTo,
             employeePda: result.employeePda!,
             privatePayrollPda: result.privatePayrollPda!,
             transferSignature,
+            accountingOnly: result.accountingOnly,
             settleSalarySignature,
             commitSignature,
           });
@@ -2623,15 +3006,15 @@ function EmployerPageContent() {
           return;
         }
 
-        const finalizeResponse = await fetch("/api/payroll/tick", {
+        const finalizeResponse = await walletAuthenticatedFetch({
+          path: `/api/payroll/tick?wallet=${walletAddress}`,
           method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
+          wallet: walletAddress,
+          signMessage,
+          body: {
             employerWallet: walletAddress,
             results: finalizedResults,
-          }),
+          },
         });
 
         const finalizeJson = (await finalizeResponse.json()) as {
@@ -2691,6 +3074,113 @@ function EmployerPageContent() {
       getTeeRpcUrl,
       privateStates,
       fetchPrivatePreview,
+      fetchPayrollConfig,
+    ],
+  );
+
+  const handleSyncPayrollState = useCallback(
+    async (stream: PayrollStream, recoveryState: TickBuildResult) => {
+      if (!walletAddress || !publicKey || !signTransaction || !signMessage) return;
+
+      try {
+        setSettlingTickStream(stream.id);
+        const teeAuthToken = await getOrFetchToken();
+
+        const { transactions, transferSignature, amountMicro } = recoveryState;
+        if ((!transactions?.settleSalary && !recoveryState.settlementAlreadyApplied) || !transactions?.commitEmployee || typeof amountMicro !== "number") {
+          throw new Error("Recovery state is missing transaction payloads or amount.");
+        }
+
+        let settleSalarySignature: string | undefined;
+        if (transactions.settleSalary) {
+          try {
+            settleSalarySignature = await signAndSend(
+              transactions.settleSalary.transactionBase64,
+              signTransaction,
+              {
+                sendTo: transactions.settleSalary.sendTo,
+                rpcUrl: getTeeRpcUrl(teeAuthToken),
+                signMessage,
+                publicKey,
+              },
+            );
+          } catch (error: unknown) {
+            throw new Error(
+              `Sync failed at settleSalary: ${error instanceof Error ? error.message : "Unknown error"}`,
+            );
+          }
+        }
+
+        let commitSignature: string;
+        try {
+          commitSignature = await signAndSend(
+            transactions.commitEmployee.transactionBase64,
+            signTransaction,
+            {
+              sendTo: transactions.commitEmployee.sendTo,
+              rpcUrl: getTeeRpcUrl(teeAuthToken),
+              signMessage,
+              publicKey,
+            },
+          );
+        } catch (error: unknown) {
+          throw new Error(
+            `Sync failed at commitEmployee: ${error instanceof Error ? error.message : "Unknown error"}`,
+          );
+        }
+
+        const finalizedResult = {
+          streamId: stream.id,
+          employeeId: stream.employeeId,
+          employeeWallet: recoveryState.employeeWallet || "", // Add required properties
+          amountMicro,
+          employeePda: recoveryState.employeePda || "",
+          privatePayrollPda: recoveryState.privatePayrollPda || "",
+          transferSignature,
+          accountingOnly: recoveryState.accountingOnly,
+          settleSalarySignature,
+          commitSignature,
+        };
+
+        const finalizeResponse = await walletAuthenticatedFetch({
+          path: `/api/payroll/tick?wallet=${walletAddress}`,
+          method: "PATCH",
+          wallet: walletAddress,
+          signMessage,
+          body: {
+            employerWallet: walletAddress,
+            results: [finalizedResult],
+          },
+        });
+
+        const finalizeJson = await finalizeResponse.json();
+        if (!finalizeResponse.ok) {
+          throw new Error(finalizeJson.error || "Failed to finalize synced tick");
+        }
+
+        toast.success(`Payroll State Synced: ${(amountMicro / 1_000_000).toFixed(6)} USDC settled`);
+        
+        // Remove from recovery state
+        setStreamsNeedingRecovery((prev) => {
+          const next = { ...prev };
+          delete next[stream.id];
+          return next;
+        });
+
+        await fetchPayrollConfig();
+      } catch (err: unknown) {
+        toast.error(`Sync failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+      } finally {
+        setSettlingTickStream((current) => (current === stream.id ? null : current));
+      }
+    },
+    [
+      walletAddress,
+      publicKey,
+      signTransaction,
+      signMessage,
+      getOrFetchToken,
+      getTeeRpcUrl,
       fetchPayrollConfig,
     ],
   );
@@ -2860,7 +3350,8 @@ function EmployerPageContent() {
             ) : null}
 
             {!focusedEmployeeId && (readinessSummary.perMissing > 0 ||
-              readinessSummary.recipientMissing > 0 ||
+              readinessSummary.recipientPending > 0 ||
+              readinessSummary.recipientFailed > 0 ||
               readinessSummary.paused > 0 ||
               (treasuryPrivateBalance !== null &&
                 monthlyLiability > treasuryPrivateBalance)) && (
@@ -2873,7 +3364,8 @@ function EmployerPageContent() {
                       </p>
                       <p className="mt-1 text-xs text-amber-300">
                         PER missing: {readinessSummary.perMissing} · Recipient init
-                        pending: {readinessSummary.recipientMissing} · Paused streams:{" "}
+                        pending: {readinessSummary.recipientPending} · Recipient init
+                        failed: {readinessSummary.recipientFailed} · Paused streams:{" "}
                         {readinessSummary.paused}
                         {treasuryPrivateBalance !== null &&
                           monthlyLiability > treasuryPrivateBalance
@@ -3132,13 +3624,26 @@ function EmployerPageContent() {
                         employeeStreamMap.get(employee.id) ?? null;
                       const pendingRequests = stream
                         ? (cashoutRequestsByStream.get(stream.id) ?? []).filter(
-                          (request) => request.status === "pending",
+                          (request) => request.status === "pending" || ["requested", "paying", "needs_sync", "failed"].includes(request.status),
                         )
                         : [];
                       const currentRate = rateInputs[employee.id] ?? "";
                       const preview = stream
                         ? (privateStates[stream.id] ?? null)
                         : null;
+                      const observedCheckpointStatus = deriveObservedCheckpointCrankStatus(
+                        {
+                          currentStatus: stream?.checkpointCrankStatus,
+                          lastAccrualTimestamp:
+                            preview?.state.lastAccrualTimestamp,
+                          nowMs,
+                        },
+                      );
+                      const checkpointStateFresh = isCheckpointStateFresh(
+                        stream,
+                        preview,
+                        nowMs,
+                      );
                       const employeeInitializedAtFromAnyStream =
                         streams.find(
                           (candidate) =>
@@ -3151,6 +3656,9 @@ function EmployerPageContent() {
                         )?.recipientPrivateInitializedAt ?? null;
                       const hasMissingPrivateState = !!(
                         stream && missingPrivateStates[stream.id]
+                      );
+                      const needsPayrollSync = !!(
+                        stream && streamsNeedingRecovery[stream.id]
                       );
                       const effectiveStatus =
                         resolveStatusWithMissing(stream, preview) ?? "stopped";
@@ -3165,12 +3673,18 @@ function EmployerPageContent() {
                         stream?.permissionPda &&
                         stream?.delegatedAt
                       );
+                      const privateInitStatus = resolvePrivateInitStatus(
+                        {
+                          ...employee,
+                          privateRecipientInitializedAt:
+                            employee.privateRecipientInitializedAt ??
+                            employeeInitializedAtFromAnyStream,
+                        },
+                        stream,
+                      );
                       const isRecipientPrivateReady =
-                        !!(
-                          stream?.recipientPrivateInitializedAt ??
-                          employee.privateRecipientInitializedAt ??
-                          employeeInitializedAtFromAnyStream
-                        );
+                        privateInitStatus === "confirmed";
+                      const privateInitBadge = getPrivateInitBadge(privateInitStatus);
                       const previewAccruedMicro = Number(
                         preview?.state.accruedUnpaidMicro ?? "0",
                       );
@@ -3229,7 +3743,9 @@ function EmployerPageContent() {
                             )}
                             <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                               <span
-                                className={`px-3 py-1 rounded-sm text-[9px] font-bold uppercase tracking-widest border shadow-sm ${effectiveStatus === "active"
+                                className={`px-3 py-1 rounded-sm text-[9px] font-bold uppercase tracking-widest border shadow-sm ${needsPayrollSync
+                                  ? "bg-amber-500/10 text-amber-300 border-amber-400/30"
+                                  : effectiveStatus === "active"
                                   ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
                                   : effectiveStatus === "paused"
                                     ? "bg-amber-500/10 text-amber-400 border-amber-300"
@@ -3238,7 +3754,7 @@ function EmployerPageContent() {
                                       : "bg-[#111111] text-[#a8a8aa] border-white/15"
                                   }`}
                               >
-                                {effectiveStatus ?? "draft"}
+                                {needsPayrollSync ? "needs sync" : effectiveStatus ?? "draft"}
                               </span>
                               <span
                                 className={`px-3 py-1 rounded-sm text-[9px] font-bold uppercase tracking-widest border shadow-sm ${isOnboarded
@@ -3249,23 +3765,38 @@ function EmployerPageContent() {
                                 {isOnboarded ? "PER LIVE" : "PER PENDING"}
                               </span>
                               <span
-                                className={`px-3 py-1 rounded-sm text-[9px] font-bold uppercase tracking-widest border shadow-sm ${isRecipientPrivateReady
-                                  ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                                  : "bg-amber-500/10 text-amber-400 border-amber-300"
-                                  }`}
+                                className={`px-3 py-1 rounded-sm text-[9px] font-bold uppercase tracking-widest border shadow-sm ${privateInitBadge.className}`}
                               >
-                                {isRecipientPrivateReady
-                                  ? "INIT ✓"
-                                  : "INIT PENDING"}
+                                {privateInitBadge.label}
                               </span>
+                              {observedCheckpointStatus === "stale" ? (
+                                <span className="px-3 py-1 rounded-sm text-[9px] font-bold uppercase tracking-widest border bg-amber-500/10 text-amber-300 border-amber-400/30 shadow-sm">
+                                  sync stale
+                                </span>
+                              ) : null}
                               {stream && pendingRequests.length > 0 ? (
                                 <span className="px-3 py-1 rounded-sm text-[9px] font-bold uppercase tracking-widest border bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/30 shadow-sm animate-pulse">
                                   CASHOUT ×{pendingRequests.length}
                                 </span>
                               ) : null}
-                              {effectiveStatus === "stopped" ? (
+                              {needsPayrollSync ? (
+                                <p className="w-full text-right text-[10px] text-amber-300 font-medium">
+                                  Previous payment was sent. Finalize PER accounting with Sync Payroll State.
+                                </p>
+                              ) : effectiveStatus === "stopped" ? (
                                 <p className="w-full text-right text-[10px] text-red-500 font-medium">
                                   Terminal state.
+                                </p>
+                              ) : null}
+                              {privateInitStatus === "failed" &&
+                              employee.privateRecipientInitError ? (
+                                <p className="w-full text-right text-[10px] text-rose-300 font-medium">
+                                  {employee.privateRecipientInitError} Ask the employee to open Claim &gt; Withdraw and initialize.
+                                </p>
+                              ) : privateInitStatus === "pending" ||
+                                privateInitStatus === "processing" ? (
+                                <p className="w-full text-right text-[10px] text-[#8f8f95] font-medium">
+                                  Employee can finish private setup later from Claim &gt; Withdraw.
                                 </p>
                               ) : null}
                             </div>
@@ -3408,7 +3939,7 @@ function EmployerPageContent() {
                                   </div>
                                   <div className="flex items-center justify-between">
                                     <span className="text-[11px] text-[#a8a8aa] font-medium">
-                                      Last checkpoint
+                                      Last tee update
                                     </span>
                                     <span className="font-mono text-xs text-white font-bold">
                                       {formatUnixTimestamp(
@@ -3440,7 +3971,7 @@ function EmployerPageContent() {
                                   </div>
                                   <div className="flex items-center justify-between">
                                     <span className="text-[11px] text-[#a8a8aa] font-medium">
-                                      Synced
+                                      Preview fetched
                                     </span>
                                     <span className="font-mono text-[11px] text-[#8f8f95]">
                                       {new Date(
@@ -3448,6 +3979,46 @@ function EmployerPageContent() {
                                       ).toLocaleTimeString()}
                                     </span>
                                   </div>
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[11px] text-[#a8a8aa] font-medium">
+                                      Checkpoint sync
+                                    </span>
+                                    <span
+                                      className={`font-mono text-[11px] font-bold uppercase ${
+                                        observedCheckpointStatus === "active" &&
+                                        checkpointStateFresh
+                                          ? "text-emerald-300"
+                                          : observedCheckpointStatus === "stale"
+                                            ? "text-amber-300"
+                                          : observedCheckpointStatus === "failed"
+                                            ? "text-rose-300"
+                                            : "text-[#8f8f95]"
+                                      }`}
+                                    >
+                                      {observedCheckpointStatus === "active"
+                                        ? "ticking"
+                                        : observedCheckpointStatus ?? "idle"}
+                                    </span>
+                                  </div>
+                                  {observedCheckpointStatus === "stale" ? (
+                                    <p className="pt-2 text-[10px] text-amber-300">
+                                      Preview is refreshing, but the TEE accrual timestamp is not advancing.
+                                      The scheduler is registered, but the actual checkpoint worker looks
+                                      stalled. Use Restart Checkpoint Sync below.
+                                    </p>
+                                  ) : null}
+                                  {stream?.checkpointCrankUpdatedAt ? (
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] text-[#a8a8aa] font-medium">
+                                        Sync updated
+                                      </span>
+                                      <span className="font-mono text-[11px] text-[#8f8f95]">
+                                        {new Date(
+                                          stream.checkpointCrankUpdatedAt,
+                                        ).toLocaleTimeString()}
+                                      </span>
+                                    </div>
+                                  ) : null}
                                 </div>
                               ) : hasMissingPrivateState ? (
                                 <div className="bg-red-500/10 border border-red-500/30 px-4 py-4 space-y-3">
@@ -3527,47 +4098,55 @@ function EmployerPageContent() {
                                         ) : null}
                                       </div>
                                       <div className="flex flex-wrap items-center gap-2 shrink-0">
-                                        <button
-                                          onClick={() =>
-                                            handleRunTick(stream, {
-                                              cashoutRequest: request,
-                                            })
-                                          }
-                                          disabled={
-                                            runningTick ||
-                                            runningTickStream !== null ||
-                                            settlingTickStream !== null ||
-                                            !isOnboarded ||
-                                            !isRecipientPrivateReady
-                                          }
-                                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-sm bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 text-[11px] font-bold transition-all disabled:opacity-30 uppercase tracking-wider shadow-sm"
-                                        >
-                                          <Zap size={13} />
-                                          Settle Now
-                                        </button>
-                                        <button
-                                          onClick={() =>
-                                            handleResolveCashoutRequest(
-                                              request,
-                                              "dismissed",
-                                              "Dismissed by employer from the payroll dashboard.",
-                                            )
-                                          }
-                                          disabled={
-                                            resolvingCashoutRequestId === request.id
-                                          }
-                                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-sm bg-[#0a0a0a] border border-white/10 text-[#a8a8aa] hover:text-white hover:border-white/30 text-[11px] font-bold transition-all disabled:opacity-30 uppercase tracking-wider shadow-sm"
-                                        >
-                                          {resolvingCashoutRequestId === request.id ? (
-                                            <Loader2
-                                              size={13}
-                                              className="animate-spin"
-                                            />
-                                          ) : (
-                                            <Square size={13} />
-                                          )}
-                                          Dismiss
-                                        </button>
+                                        {(request as any).isOnChain ? (
+                                          <span className="rounded-full border border-white/15 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[#a8a8aa]">
+                                            {request.status}
+                                          </span>
+                                        ) : (
+                                          <>
+                                            <button
+                                              onClick={() =>
+                                                handleRunTick(stream, {
+                                                  cashoutRequest: request,
+                                                })
+                                              }
+                                              disabled={
+                                                runningTick ||
+                                                runningTickStream !== null ||
+                                                settlingTickStream !== null ||
+                                                !isOnboarded ||
+                                                !isRecipientPrivateReady
+                                              }
+                                              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-sm bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 text-[11px] font-bold transition-all disabled:opacity-30 uppercase tracking-wider shadow-sm"
+                                            >
+                                              <Zap size={13} />
+                                              Settle Now
+                                            </button>
+                                            <button
+                                              onClick={() =>
+                                                handleResolveCashoutRequest(
+                                                  request,
+                                                  "dismissed",
+                                                  "Dismissed by employer from the payroll dashboard.",
+                                                )
+                                              }
+                                              disabled={
+                                                resolvingCashoutRequestId === request.id
+                                              }
+                                              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-sm bg-[#0a0a0a] border border-white/10 text-[#a8a8aa] hover:text-white hover:border-white/30 text-[11px] font-bold transition-all disabled:opacity-30 uppercase tracking-wider shadow-sm"
+                                            >
+                                              {resolvingCashoutRequestId === request.id ? (
+                                                <Loader2
+                                                  size={13}
+                                                  className="animate-spin"
+                                                />
+                                              ) : (
+                                                <Square size={13} />
+                                              )}
+                                              Dismiss
+                                            </button>
+                                          </>
+                                        )}
                                       </div>
                                     </div>
                                   </div>
@@ -3623,8 +4202,21 @@ function EmployerPageContent() {
                             {/* Separator */}
                             <div className="w-px h-5 bg-neutral-300" />
 
-                            {/* Run Tick */}
-                            {stream && (
+                            {/* Run Tick / Sync State */}
+                            {stream && streamsNeedingRecovery[stream.id] ? (
+                              <button
+                                onClick={() => handleSyncPayrollState(stream, streamsNeedingRecovery[stream.id])}
+                                disabled={settlingTickStream === stream.id || !walletAddress}
+                                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-amber-500/10 border border-amber-500/30 text-amber-500 hover:bg-amber-500/20 text-[11px] font-bold transition-all shadow-sm uppercase tracking-wider disabled:opacity-60"
+                              >
+                                {settlingTickStream === stream.id ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <RotateCcw size={13} />
+                                )}
+                                {settlingTickStream === stream.id ? "Syncing..." : "Sync Payroll State"}
+                              </button>
+                            ) : stream && (
                               <>
                                 <div className="inline-flex items-center gap-2 rounded-sm border border-white/15 bg-[#0a0a0a] px-4 py-2">
                                   <input
@@ -3865,6 +4457,60 @@ function EmployerPageContent() {
                             ) : null}
 
                             {/* Refresh Preview */}
+                            {stream && (
+                              <button
+                                onClick={() => {
+                                  const observedCheckpointStatus =
+                                    deriveObservedCheckpointCrankStatus({
+                                      currentStatus: stream.checkpointCrankStatus,
+                                      lastAccrualTimestamp:
+                                        privateStates[stream.id]?.state
+                                          .lastAccrualTimestamp,
+                                      nowMs,
+                                    });
+
+                                  if (observedCheckpointStatus === "stale") {
+                                    void handleRestartCheckpointCrank(stream);
+                                    return;
+                                  }
+
+                                  void handleCheckpointCrank(
+                                    stream,
+                                    stream.checkpointCrankStatus === "active"
+                                      ? "cancel"
+                                      : "schedule",
+                                  );
+                                }}
+                                disabled={
+                                  !walletAddress ||
+                                  checkpointingStream === stream.id ||
+                                  !isOnboarded ||
+                                  effectiveStatus === "stopped"
+                                }
+                                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0a0a0a] border border-white/15 text-[#b6b6bc] hover:text-white hover:border-white/30 text-[11px] font-bold transition-all disabled:opacity-60 uppercase tracking-wider shadow-sm"
+                              >
+                                {checkpointingStream === stream.id ? (
+                                  <Loader2
+                                    size={13}
+                                    className="animate-spin"
+                                  />
+                                ) : (
+                                  <RefreshCw size={13} />
+                                )}
+                                {deriveObservedCheckpointCrankStatus({
+                                  currentStatus: stream.checkpointCrankStatus,
+                                  lastAccrualTimestamp:
+                                    privateStates[stream.id]?.state
+                                      .lastAccrualTimestamp,
+                                  nowMs,
+                                }) === "stale"
+                                  ? "Restart Checkpoint Sync"
+                                  : stream.checkpointCrankStatus === "active"
+                                    ? "Stop Checkpoint Sync"
+                                    : "Start Checkpoint Sync"}
+                              </button>
+                            )}
+
                             {stream && (
                               <button
                                 onClick={() => fetchPrivatePreview(stream)}

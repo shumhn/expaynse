@@ -523,7 +523,7 @@ export default function ManualBatchPayrollPage() {
                         </span>
                         {step.sig && (
                           <a
-                            href={`https://explorer.solana.com/tx/${step.sig}?cluster=devnet`}
+                            href={`https://solscan.io/tx/${step.sig}?cluster=devnet`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="flex items-center gap-1.5 rounded-full border border-emerald-400/20 bg-emerald-400/5 px-3 py-1 font-mono text-[12px] text-emerald-400 transition-colors hover:text-emerald-300 hover:underline"
@@ -597,7 +597,7 @@ export default function ManualBatchPayrollPage() {
               <div className="mb-8 space-y-2">
                 {successModal.depositSig && (
                   <a
-                    href={`https://explorer.solana.com/tx/${successModal.depositSig}?cluster=devnet`}
+                    href={`https://solscan.io/tx/${successModal.depositSig}?cluster=devnet`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="group flex w-full items-center justify-between rounded-xl border border-white/5 bg-white/5 px-4 py-3 transition-all hover:border-white/10 hover:bg-white/10"
@@ -614,7 +614,7 @@ export default function ManualBatchPayrollPage() {
 
                 {successModal.transferSig && (
                   <a
-                    href={`https://explorer.solana.com/tx/${successModal.transferSig}?cluster=devnet`}
+                    href={`https://solscan.io/tx/${successModal.transferSig}?cluster=devnet`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="group flex w-full items-center justify-between rounded-xl border border-white/5 bg-white/5 px-4 py-3 transition-all hover:border-white/10 hover:bg-white/10"

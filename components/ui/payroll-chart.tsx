@@ -52,13 +52,7 @@ function CustomTooltip({
 }
 
 export function RunwayProjectionChart({ vaultBalance, monthlyBurnRate }: RunwayChartProps) {
-  const isMock = monthlyBurnRate === 0;
-  
-  // If burn rate is 0 (mock), simulate a healthy $210k vault burning $35k/mo
-  const displayBalance = isMock ? 210000 : vaultBalance;
-  const displayBurnRate = isMock ? 35000 : monthlyBurnRate;
-
-  const data = useMemo(() => generateProjection(displayBalance, displayBurnRate), [displayBalance, displayBurnRate]);
+  const data = useMemo(() => generateProjection(vaultBalance, monthlyBurnRate), [vaultBalance, monthlyBurnRate]);
 
   return (
     <Card className="relative">
@@ -67,12 +61,7 @@ export function RunwayProjectionChart({ vaultBalance, monthlyBurnRate }: RunwayC
         <CardDescription>Estimated vault depletion based on active streams</CardDescription>
       </CardHeader>
       <CardContent>
-        {isMock && (
-          <div className="absolute top-6 right-6 inline-flex items-center px-2.5 py-1 rounded-full border border-white/10 bg-white/5 text-[10px] font-bold tracking-wider text-[#a8a8aa] uppercase z-10">
-            Example Data
-          </div>
-        )}
-        <div className={`h-[280px] w-full min-w-0 transition-opacity duration-300 ${isMock ? 'pointer-events-none' : ''}`}>
+        <div className="h-[280px] w-full min-w-0 transition-opacity duration-300">
           <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={280}>
             <AreaChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
               <defs>
@@ -113,7 +102,7 @@ export function RunwayProjectionChart({ vaultBalance, monthlyBurnRate }: RunwayC
                 fill={data[data.length - 1].balance === 0 ? "url(#criticalGradient)" : "url(#runwayGradient)"}
               />
               {/* Optional Refill Warning Line */}
-              <ReferenceLine y={displayBurnRate * 1.5} stroke={EXPAYNSE_RED} strokeDasharray="3 3" opacity={0.5} />
+              <ReferenceLine y={monthlyBurnRate * 1.5} stroke={EXPAYNSE_RED} strokeDasharray="3 3" opacity={0.5} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
