@@ -7,7 +7,7 @@ WORKSPACE_DIR="$ROOT_DIR/payroll1-rust"
 ANCHOR_TOML_PATH="$WORKSPACE_DIR/Anchor.toml"
 IDL_PATH="$WORKSPACE_DIR/target/idl/payroll.json"
 PROGRAM_KEYPAIR_PATH="$WORKSPACE_DIR/target/deploy/payroll-keypair.json"
-PROGRAM_ID="EMM7YS2Jhzmu5fgF71vHty6P2tP7dErENL6tp3YppAYR"
+PROGRAM_ID="HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6"
 DEFAULT_WALLET="/Users/sumangiri/Desktop/Homie/keys/payroll-authority.json"
 
 usage() {
@@ -163,7 +163,8 @@ log "Validating generated local IDL contains crank instructions"
 for instruction in \
   initialize_private_payroll \
   pay_salary \
-  settle_salary \
+  mark_private_transfer_paid \
+  request_withdrawal \
   update_private_terms \
   pause_stream \
   resume_stream \
@@ -233,7 +234,8 @@ log "Fetching canonical on-chain IDL for verification"
 for instruction in \
   initialize_private_payroll \
   pay_salary \
-  settle_salary \
+  mark_private_transfer_paid \
+  request_withdrawal \
   update_private_terms \
   pause_stream \
   resume_stream \
@@ -248,3 +250,9 @@ done
 log "IDL repair completed successfully"
 printf 'Fetched devnet IDL saved to: %s\n' "$TMP_FETCHED_IDL"
 printf 'Verified crank instructions are now present on-chain.\n'
+
+log "Verifying full local and on-chain payroll IDL parity"
+(
+  cd "$ROOT_DIR"
+  ANCHOR_WALLET="$ANCHOR_WALLET" node scripts/check-payroll-idl-parity.js
+)

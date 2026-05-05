@@ -1322,6 +1322,7 @@ dependencies = [
  "bincode",
  "ephemeral-rollups-sdk",
  "magicblock-magic-program-api",
+ "solana-program",
 ]
 
 [[package]]

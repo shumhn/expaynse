@@ -5,18 +5,18 @@ package_manager = "yarn"
 resolution = true
 skip-lint = false
 
-[programs.localnet]
-payroll = "EMM7YS2Jhzmu5fgF71vHty6P2tP7dErENL6tp3YppAYR"
-
 [programs.devnet]
-payroll = "EMM7YS2Jhzmu5fgF71vHty6P2tP7dErENL6tp3YppAYR"
+payroll = "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6"
+
+[programs.localnet]
+payroll = "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
 cluster = "devnet"
-wallet = "/Users/sumangiri/Desktop/Homie/keys/payroll-authority.json"
+wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""

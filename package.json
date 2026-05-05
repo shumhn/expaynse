@@ -12,9 +12,11 @@
     "test:cashout:payout-mode": "node --env-file=.env --loader ./tests/alias-loader.mjs tests/cashout-payout-mode-e2e.ts",
     "test:employee:init-reuse": "node --env-file=.env --loader ./tests/alias-loader.mjs tests/employee-init-reuse-smoke.ts",
     "test:checkpoint:logic": "node --loader ./tests/alias-loader.mjs tests/checkpoint-crank-logic.test.ts",
+    "test:checkpoint:regression": "node --env-file=.env --loader ./tests/alias-loader.mjs tests/checkpoint-crank-regression.e2e.ts",
     "test:magicblock:e2e": "node tests/magicblock-api-e2e.ts",
     "test:app:self-custody": "node --env-file=.env --loader ./tests/alias-loader.mjs tests/app-self-custodial-e2e.ts",
-    "deploy:payroll:devnet": "sh ./scripts/deploy-private-payroll-devnet.sh"
+    "deploy:payroll:devnet": "sh ./scripts/deploy-private-payroll-devnet.sh",
+    "check:payroll:idl-parity": "node ./scripts/check-payroll-idl-parity.js"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.53",
@@ -58,7 +60,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/canvas-confetti": "^1.9.0",
-    "@types/node": "^20",
+    "@types/node": "^20.19.39",
     "@types/papaparse": "^5.5.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",

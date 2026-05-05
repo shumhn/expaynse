@@ -10,8 +10,8 @@ PROGRAM_KEYPAIR_PATH="$WORKSPACE_DIR/target/deploy/payroll-keypair.json"
 ANCHOR_TOML_PATH="$WORKSPACE_DIR/Anchor.toml"
 RUST_LIB_PATH="$WORKSPACE_DIR/programs/payroll/src/lib.rs"
 
-EXPECTED_PROGRAM_ID="EMM7YS2Jhzmu5fgF71vHty6P2tP7dErENL6tp3YppAYR"
-REQUIRED_INSTRUCTIONS="initialize_private_payroll pay_salary settle_salary update_private_terms pause_stream resume_stream stop_stream schedule_checkpoint_accrual cancel_checkpoint_accrual checkpoint_accrual"
+EXPECTED_PROGRAM_ID="HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6"
+REQUIRED_INSTRUCTIONS="initialize_private_payroll pay_salary mark_private_transfer_paid request_withdrawal update_private_terms pause_stream resume_stream stop_stream schedule_checkpoint_accrual cancel_checkpoint_accrual checkpoint_accrual"
 
 BUILD_ONLY=0
 SKIP_VERIFY=0
@@ -165,7 +165,7 @@ fi
 log "Deploying payroll program to devnet"
 (
   cd "$WORKSPACE_DIR"
-  anchor deploy --provider.cluster devnet
+  anchor deploy --provider.cluster devnet --provider.wallet "$ANCHOR_WALLET"
 )
 
 log "Printing deployed program details"
@@ -178,6 +178,12 @@ fi
 
 PROGRAM_INFO_OUTPUT=$(solana program show "$EXPECTED_PROGRAM_ID" --url devnet || true)
 printf '%s\n' "$PROGRAM_INFO_OUTPUT"
+
+log "Verifying local and on-chain payroll IDL parity"
+(
+  cd "$ROOT_DIR"
+  ANCHOR_WALLET="$ANCHOR_WALLET" node scripts/check-payroll-idl-parity.js
+)
 
 if [ "$SKIP_VERIFY" -eq 1 ]; then
   log "Skipping post-deploy verifier"
