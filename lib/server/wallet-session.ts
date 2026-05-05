@@ -15,7 +15,7 @@ function getSessionSecret() {
   return secret;
 }
 
-const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
+const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 type WalletSessionPayload = {
   wallet: string;

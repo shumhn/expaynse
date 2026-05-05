@@ -53,7 +53,7 @@ interface StreamInfo {
   employeePda?: string | null;
   privatePayrollPda?: string | null;
   delegatedAt: string | null;
-  checkpointCrankStatus?: "idle" | "pending" | "active" | "failed" | "stopped" | null;
+  checkpointCrankStatus?: "idle" | "pending" | "active" | "failed" | "stopped" | "stale" | null;
   totalPaid: number;
 }
 

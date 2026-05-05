@@ -22,7 +22,6 @@ import { toast } from "sonner";
 import { EmployerLayout } from "@/components/employer-layout";
 import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
 import {
-  clearCachedTeeToken,
   getOrCreateCachedTeeToken,
   loadCachedTeeToken,
 } from "@/lib/client/tee-auth-cache";
@@ -53,6 +52,13 @@ interface Employee {
   weeklyHours?: number;
   monthlySalaryUsd?: number;
   startDate?: string | null;
+  privateRecipientInitializedAt?: string | null;
+  privateRecipientInitStatus?: "pending" | "processing" | "confirmed" | "failed";
+  privateRecipientInitRequestedAt?: string | null;
+  privateRecipientInitLastAttemptAt?: string | null;
+  privateRecipientInitConfirmedAt?: string | null;
+  privateRecipientInitTxSignature?: string | null;
+  privateRecipientInitError?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -71,7 +77,7 @@ interface StreamInfo {
   lastPaidAt: string | null;
   delegatedAt: string | null;
   recipientPrivateInitializedAt?: string | null;
-  checkpointCrankStatus?: "idle" | "pending" | "active" | "failed" | "stopped" | null;
+  checkpointCrankStatus?: "idle" | "pending" | "active" | "failed" | "stopped" | "stale" | null;
 }
 
 interface PrivatePayrollStateResponse {
@@ -94,6 +100,8 @@ interface PrivatePayrollStateResponse {
   };
   syncedAt: string;
 }
+
+const PER_CHECKPOINT_STALE_MS = 15_000;
 
 function shorten(addr: string) {
   return addr.slice(0, 4) + "..." + addr.slice(-4);
@@ -171,6 +179,56 @@ function getPrivateReadiness(stream: StreamInfo | null) {
   };
 }
 
+function getPrivateInitStatus(employee: Employee, stream: StreamInfo | null) {
+  if (
+    stream?.recipientPrivateInitializedAt ||
+    employee.privateRecipientInitializedAt ||
+    employee.privateRecipientInitConfirmedAt
+  ) {
+    return "confirmed" as const;
+  }
+
+  return employee.privateRecipientInitStatus ?? "pending";
+}
+
+function getPrivateReadinessState(
+  employee: Employee,
+  stream: StreamInfo | null,
+  hasMissingPrivateState: boolean,
+) {
+  const initStatus = getPrivateInitStatus(employee, stream);
+
+  if (hasMissingPrivateState) {
+    return {
+      label: "Expired",
+      className: "bg-rose-500/15 text-rose-300 border-rose-400/30",
+    };
+  }
+
+  if (initStatus === "failed") {
+    return {
+      label: "Init failed",
+      className: "bg-rose-500/15 text-rose-300 border-rose-400/30",
+    };
+  }
+
+  if (initStatus === "processing") {
+    return {
+      label: "Init syncing",
+      className: "bg-blue-500/15 text-blue-300 border-blue-400/30",
+    };
+  }
+
+  if (initStatus !== "confirmed") {
+    return {
+      label: "Init pending",
+      className: "bg-amber-500/15 text-amber-300 border-amber-400/30",
+    };
+  }
+
+  return getPrivateReadiness(stream);
+}
+
 function isPerReady(stream: StreamInfo | null) {
   if (!stream) return false;
   return Boolean(stream.privatePayrollPda && stream.employeePda && stream.delegatedAt);
@@ -244,9 +302,6 @@ export default function PeoplePage() {
   const [newPayoutMode, setNewPayoutMode] = useState<PayrollPayoutMode>(
     DEFAULT_PAYROLL_PAYOUT_MODE,
   );
-  const [newStartDateTime, setNewStartDateTime] = useState(
-    getDefaultStartDateTime(),
-  );
   const [now, setNow] = useState(() => Date.now());
   const [privateStates, setPrivateStates] = useState<
     Record<string, PrivatePayrollStateResponse>
@@ -272,6 +327,23 @@ export default function PeoplePage() {
     return nowMs - syncedAtMs <= PER_PREVIEW_MAX_STALENESS_MS;
   }
 
+  function isCheckpointProgressFresh(
+    stream: StreamInfo | null | undefined,
+    preview: PrivatePayrollStateResponse | null | undefined,
+    nowMs: number,
+  ) {
+    if (!stream || stream.checkpointCrankStatus !== "active" || !preview) {
+      return false;
+    }
+
+    const lastAccrualMs = Number(preview.state.lastAccrualTimestamp) * 1000;
+    if (!Number.isFinite(lastAccrualMs) || lastAccrualMs <= 0) {
+      return false;
+    }
+
+    return nowMs - lastAccrualMs <= PER_CHECKPOINT_STALE_MS;
+  }
+
   function getLiveAccrued(preview?: PrivatePayrollStateResponse | null) {
     if (preview) {
       const accruedUnpaid = Number(preview.state.accruedUnpaidMicro) / 1_000_000;
@@ -289,9 +361,6 @@ export default function PeoplePage() {
 
   useEffect(() => {
     tokenCache.current = null;
-    if (publicKey) {
-      clearCachedTeeToken(publicKey.toBase58());
-    }
   }, [publicKey]);
 
   const getOrFetchToken = useCallback(async () => {
@@ -407,20 +476,20 @@ export default function PeoplePage() {
     [walletAddr, getOrFetchToken],
   );
 
-  useEffect(() => {
-    if (!walletAddr || !signMessage) {
-      const timeoutId = window.setTimeout(() => {
+  const loadPeople = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!walletAddr || !signMessage) {
         setEmployees([]);
         setStreams([]);
         setPrivateStates({});
         setMissingPrivateStates({});
-      }, 0);
-      return () => window.clearTimeout(timeoutId);
-    }
+        return;
+      }
 
-    let cancelled = false;
-    const load = async () => {
-      setLoading(true);
+      if (!options?.silent) {
+        setLoading(true);
+      }
+
       try {
         const [empRes, strRes] = await Promise.all([
           walletAuthenticatedFetch({
@@ -436,19 +505,50 @@ export default function PeoplePage() {
         ]);
         const empJson = await empRes.json();
         const strJson = await strRes.json();
-        if (!cancelled && empRes.ok) setEmployees(empJson.employees ?? []);
-        if (!cancelled && strRes.ok) setStreams(strJson.streams ?? []);
-      } catch {
-        if (!cancelled) toast.error("Failed to load people");
+        if (!empRes.ok) {
+          throw new Error(empJson.error || "Failed to load employees");
+        }
+        if (!strRes.ok) {
+          throw new Error(strJson.error || "Failed to load streams");
+        }
+        setEmployees(empJson.employees ?? []);
+        setStreams(strJson.streams ?? []);
+      } catch (error: unknown) {
+        if (!options?.silent) {
+          toast.error(error instanceof Error ? error.message : "Failed to load people");
+        }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!options?.silent) {
+          setLoading(false);
+        }
       }
-    };
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [walletAddr, signMessage]);
+    },
+    [walletAddr, signMessage],
+  );
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadPeople();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [loadPeople]);
+
+  useEffect(() => {
+    if (!walletAddr || !signMessage) return;
+    const hasInitInFlight = employees.some((employee) => {
+      const status = employee.privateRecipientInitStatus ?? "pending";
+      return status === "pending" || status === "processing";
+    });
+    if (!hasInitInFlight) return;
+
+    const timer = window.setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void loadPeople({ silent: true });
+    }, 4_000);
+
+    return () => window.clearInterval(timer);
+  }, [employees, loadPeople, signMessage, walletAddr]);
 
   useEffect(() => {
     if (!walletAddr || !signMessage) return;
@@ -557,9 +657,7 @@ export default function PeoplePage() {
   const getStream = (empId: string) =>
     streams.find((s) => s.employeeId === empId);
   const parsedAmount = Number.parseFloat(newCompensationAmount || "0");
-  const startDateTimeIso = newStartDateTime
-    ? new Date(newStartDateTime).toISOString()
-    : "";
+  const startDateTimeIso = new Date().toISOString();
   const previewRatePerSecond = monthlyUsdToRatePerSecond(parsedAmount);
 
   const handleAdd = async () => {
@@ -569,8 +667,7 @@ export default function PeoplePage() {
       !newName.trim() ||
       !newWallet.trim() ||
       !Number.isFinite(parsedAmount) ||
-      parsedAmount <= 0 ||
-      !newStartDateTime
+      parsedAmount <= 0
     ) {
       return;
     }
@@ -641,8 +738,19 @@ export default function PeoplePage() {
       setNewRole(ROLE_OPTIONS_BY_DEPARTMENT[DEPARTMENT_OPTIONS[0]][0]);
       setNewCompensationAmount("");
       setNewPayoutMode(DEFAULT_PAYROLL_PAYOUT_MODE);
-      setNewStartDateTime(getDefaultStartDateTime());
-      toast.success("Employee added to payroll");
+      if (employee.privateRecipientInitStatus === "confirmed") {
+        toast.success("Employee added and private init completed.");
+      } else if (employee.privateRecipientInitStatus === "failed") {
+        toast.warning(
+          employee.privateRecipientInitError
+            ? `Employee added, but private init failed: ${employee.privateRecipientInitError}. Ask the employee to open Claim > Withdraw and initialize their private account.`
+            : "Employee added, but private init failed. Ask the employee to open Claim > Withdraw and initialize their private account.",
+        );
+      } else {
+        toast.success(
+          "Employee added. Auto-init is syncing; if it does not finish, the employee can self-initialize from Claim > Withdraw.",
+        );
+      }
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : "Failed to add");
     } finally {
@@ -790,6 +898,11 @@ export default function PeoplePage() {
                 const stream = getStream(emp.id) ?? null;
                 const preview = stream ? (privateStates[stream.id] ?? null) : null;
                 const hasFreshPreview = isFreshPrivatePreview(preview, now);
+                const hasFreshCheckpointProgress = isCheckpointProgressFresh(
+                  stream,
+                  preview,
+                  now,
+                );
                 const hasMissingPrivateState = !!(stream && missingPrivateStates[stream.id]);
                 const status = resolveEffectiveStatus(stream, preview);
                 const hasFutureStart = Boolean(
@@ -802,31 +915,36 @@ export default function PeoplePage() {
                   perReady &&
                   !hasFutureStart &&
                   !hasMissingPrivateState &&
-                  hasFreshPreview;
+                  hasFreshPreview &&
+                  hasFreshCheckpointProgress;
                 const statusLabel =
                   isStreamingLive
                     ? "Streaming"
                     : hasMissingPrivateState
                       ? "State missing"
-                    : hasFutureStart
-                      ? "Scheduled"
-                      : status === "active"
-                        ? "Needs sync"
-                        : status === "paused"
-                          ? "Paused"
-                          : "Stopped";
+                      : stream?.checkpointCrankStatus === "active" && hasFreshPreview
+                        ? "Checkpoint stale"
+                      : hasFutureStart
+                        ? "Scheduled"
+                        : status === "active"
+                          ? "Needs sync"
+                          : status === "paused"
+                            ? "Paused"
+                            : "Stopped";
                 const statusColor =
                   isStreamingLive
                     ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/30"
                     : hasMissingPrivateState
                       ? "bg-rose-500/15 text-rose-300 border-rose-400/30"
-                    : hasFutureStart
-                      ? "bg-blue-500/15 text-blue-300 border-blue-400/30"
-                      : status === "active"
+                      : stream?.checkpointCrankStatus === "active" && hasFreshPreview
                         ? "bg-amber-500/15 text-amber-300 border-amber-400/30"
-                        : status === "paused"
+                      : hasFutureStart
+                        ? "bg-blue-500/15 text-blue-300 border-blue-400/30"
+                        : status === "active"
                           ? "bg-amber-500/15 text-amber-300 border-amber-400/30"
-                          : "bg-rose-500/15 text-rose-300 border-rose-400/30";
+                          : status === "paused"
+                            ? "bg-amber-500/15 text-amber-300 border-amber-400/30"
+                            : "bg-rose-500/15 text-rose-300 border-rose-400/30";
                 const compensationBasis = formatCompensationBasis(emp);
                 const dailyRate = emp.monthlySalaryUsd
                   ? formatSolRate(monthlyUsdToRatePerSecond(emp.monthlySalaryUsd))
@@ -897,7 +1015,11 @@ export default function PeoplePage() {
                         <>
                           <TrendingUp size={12} className="text-[#8f8f95]" />
                           <span className={status === "active" ? "font-bold text-amber-300" : "text-[#b6b6bc]"}>
-                            {status === "active" ? "Needs sync" : "—"}
+                            {stream?.checkpointCrankStatus === "active" && hasFreshPreview
+                              ? "Checkpoint stale"
+                              : status === "active"
+                                ? "Needs sync"
+                                : "—"}
                           </span>
                         </>
                       )}
@@ -906,12 +1028,11 @@ export default function PeoplePage() {
                     {/* Private */}
                     <div>
                       {(() => {
-                        const readiness = hasMissingPrivateState
-                          ? {
-                            label: "Expired",
-                            className: "bg-rose-500/15 text-rose-300 border-rose-400/30",
-                          }
-                          : getPrivateReadiness(stream);
+                        const readiness = getPrivateReadinessState(
+                          emp,
+                          stream,
+                          hasMissingPrivateState,
+                        );
                         return (
                           <span
                             className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border ${readiness.className}`}
@@ -920,6 +1041,18 @@ export default function PeoplePage() {
                           </span>
                         );
                       })()}
+                      {emp.privateRecipientInitStatus === "failed" ? (
+                        <p className="mt-1 text-[10px] text-rose-300">
+                          {emp.privateRecipientInitError
+                            ? `${emp.privateRecipientInitError} Ask the employee to open Claim > Withdraw and initialize.`
+                            : "Auto-init failed. Ask the employee to open Claim > Withdraw and initialize."}
+                        </p>
+                      ) : emp.privateRecipientInitStatus === "pending" ||
+                        emp.privateRecipientInitStatus === "processing" ? (
+                        <p className="mt-1 text-[10px] text-[#8f8f95]">
+                          Employee can finish setup later from Claim &gt; Withdraw if needed.
+                        </p>
+                      ) : null}
                     </div>
 
                     {/* Stream status */}
@@ -943,7 +1076,9 @@ export default function PeoplePage() {
                         ) : status === "active" ? (
                           <>
                             <PauseCircle size={10} />
-                            Needs sync
+                            {stream?.checkpointCrankStatus === "active" && hasFreshPreview
+                              ? "Checkpoint stale"
+                              : "Needs sync"}
                           </>
                         ) : status === "paused" ? (
                           <>
@@ -1089,17 +1224,9 @@ export default function PeoplePage() {
                   <label className="text-[11px] font-bold text-[#8f8f95] uppercase tracking-wider mb-1.5 block">
                     Settlement mode
                   </label>
-                  <select
-                    value={newPayoutMode}
-                    onChange={(e) => setNewPayoutMode(e.target.value as PayrollPayoutMode)}
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#1eba98]/25"
-                  >
-                    {PAYROLL_PAYOUT_MODE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-white/50 cursor-not-allowed">
+                    Private stream (ephemeral)
+                  </div>
                   <p className="text-[11px] text-[#8f8f95] mt-2">
                     {payoutModeSummary(newPayoutMode)}
                   </p>
@@ -1109,12 +1236,9 @@ export default function PeoplePage() {
                 <label className="text-[11px] font-bold text-[#8f8f95] uppercase tracking-wider mb-1.5 block">
                   Stream starts at
                 </label>
-                <input
-                  value={newStartDateTime}
-                  onChange={(e) => setNewStartDateTime(e.target.value)}
-                  type="datetime-local"
-                  className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#1eba98]/25"
-                />
+                <div className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-white/50 cursor-not-allowed">
+                  Immediately upon onboarding
+                </div>
               </div>
             </div>
 
@@ -1124,7 +1248,6 @@ export default function PeoplePage() {
                 adding ||
                 !newName.trim() ||
                 !newWallet.trim() ||
-                !newStartDateTime ||
                 !Number.isFinite(parsedAmount) ||
                 parsedAmount <= 0
               }
