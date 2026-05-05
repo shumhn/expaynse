@@ -1069,23 +1069,23 @@ async function main() {
     employerWallet,
     employerTeeAuthToken,
     signer: authority,
-    minAmountMicro: BigInt(streamResult.amountMicro),
+    minAmountMicro: BigInt(streamResult.amountMicro!),
   });
 
   const transferSignature = await sendBuiltTransaction({
-    spec: streamResult.transactions.transfer,
+    spec: streamResult.transactions!.transfer!,
     signer: authority,
     signerLabel: "tick:transfer",
   });
   const settleSalarySignature = await sendBuiltTransaction({
-    spec: streamResult.transactions.settleSalary,
+    spec: streamResult.transactions!.settleSalary!,
     signer: authority,
     signerLabel: "tick:settleSalary",
     teeAuthToken: employerTeeAuthToken,
     useTeeRpc: true,
   });
   const commitSignature = await sendBuiltTransaction({
-    spec: streamResult.transactions.commitEmployee,
+    spec: streamResult.transactions!.commitEmployee!,
     signer: authority,
     signerLabel: "tick:commitEmployee",
     teeAuthToken: employerTeeAuthToken,
@@ -1104,7 +1104,7 @@ async function main() {
       streamId,
       employeeId,
       employeeWallet,
-      amountMicro: streamResult.amountMicro,
+      amountMicro: streamResult.amountMicro!,
       employeePda: streamResult.employeePda!,
       privatePayrollPda: streamResult.privatePayrollPda!,
       transferSignature,

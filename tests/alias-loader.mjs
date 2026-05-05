@@ -49,5 +49,42 @@ export async function resolve(specifier, context, defaultResolve) {
     };
   }
 
+  // Handle extensionless relative imports within the project (e.g. "./mongodb")
+  if (specifier.startsWith("./") || specifier.startsWith("../")) {
+    const parentUrl = context.parentURL;
+    if (parentUrl && parentUrl.startsWith("file://")) {
+      const parentDir = path.dirname(new URL(parentUrl).pathname);
+      const candidate = path.resolve(parentDir, specifier);
+      // Only intervene if the specifier has no extension
+      if (!path.extname(specifier)) {
+        const resolved = resolveTsPathAbsolute(candidate);
+        if (resolved) {
+          return { url: pathToFileURL(resolved).href, shortCircuit: true };
+        }
+      }
+    }
+  }
+
   return defaultResolve(specifier, context, defaultResolve);
+}
+
+function resolveTsPathAbsolute(basePath) {
+  const candidates = [
+    basePath,
+    `${basePath}.ts`,
+    `${basePath}.tsx`,
+    `${basePath}.js`,
+    `${basePath}.mjs`,
+    path.join(basePath, "index.ts"),
+    path.join(basePath, "index.tsx"),
+    path.join(basePath, "index.js"),
+    path.join(basePath, "index.mjs"),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
