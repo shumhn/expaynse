@@ -108,6 +108,29 @@ function normalizeProviderMeta(value: unknown): ProviderMetaRecord | undefined {
     meta.sendTo = input.sendTo.trim();
   }
 
+  if (
+    input.action === "employee-withdrawal" ||
+    input.action === "employee-private-transfer" ||
+    input.action === "claim"
+  ) {
+    meta.action = input.action;
+  }
+
+  if (
+    typeof input.destinationWallet === "string" &&
+    input.destinationWallet.trim()
+  ) {
+    meta.destinationWallet = input.destinationWallet.trim();
+  }
+
+  if (typeof input.creditVerified === "boolean") {
+    meta.creditVerified = input.creditVerified;
+  }
+
+  if (typeof input.errorMessage === "string" && input.errorMessage.trim()) {
+    meta.errorMessage = input.errorMessage.trim();
+  }
+
   return Object.keys(meta).length > 0 ? meta : undefined;
 }
 
@@ -197,7 +220,7 @@ export async function POST(request: NextRequest) {
           amount?: number;
           recipient?: string;
           txSig?: string;
-          status?: "success" | "failed";
+          status?: "success" | "failed" | "submitted";
           privacyConfig?: unknown;
           providerMeta?: unknown;
         });
@@ -230,8 +253,8 @@ export async function POST(request: NextRequest) {
           return badRequest("recipientAddresses must be an array");
         }
 
-        if (!body.status || !["success", "failed"].includes(body.status)) {
-          return badRequest("status must be success or failed");
+        if (!body.status || !["success", "failed", "submitted"].includes(body.status)) {
+          return badRequest("status must be success, failed, or submitted");
         }
 
         const payrollRun = await savePayrollRun({

@@ -1,8 +1,14 @@
 import { randomUUID } from "crypto";
 import { MongoClient, Db, Collection } from "mongodb";
+import type { CheckpointCrankStatus } from "@/lib/checkpoint-sync";
 
 export type PayrollStreamStatus = "active" | "paused" | "stopped";
 export type PayrollPayoutMode = "base" | "ephemeral";
+export type PrivateRecipientInitStatus =
+  | "pending"
+  | "processing"
+  | "confirmed"
+  | "failed";
 
 export interface EmployerRecord {
   id: string;
@@ -27,6 +33,12 @@ export interface EmployeeRecord {
   monthlySalaryUsd?: number;
   startDate?: string | null;
   privateRecipientInitializedAt?: string | null;
+  privateRecipientInitStatus?: PrivateRecipientInitStatus;
+  privateRecipientInitRequestedAt?: string | null;
+  privateRecipientInitLastAttemptAt?: string | null;
+  privateRecipientInitConfirmedAt?: string | null;
+  privateRecipientInitTxSignature?: string | null;
+  privateRecipientInitError?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -46,7 +58,7 @@ export interface PayrollStreamRecord {
   recipientPrivateInitializedAt?: string | null;
   checkpointCrankTaskId?: string | null;
   checkpointCrankSignature?: string | null;
-  checkpointCrankStatus?: "idle" | "pending" | "active" | "failed" | "stopped";
+  checkpointCrankStatus?: CheckpointCrankStatus;
   checkpointCrankUpdatedAt?: string | null;
   lastPaidAt: string | null;
   totalPaid: number;
@@ -72,6 +84,14 @@ export interface PayrollStreamRecord {
   updatedAt: string;
 }
 
+export type TransferStatus = 
+  | "transfer_pending"    // DB record created, API not confirmed yet
+  | "transfer_sent"       // money tx sent, payroll state not settled yet
+  | "settlement_pending"  // waiting for settleSalary/mark_paid
+  | "success"             // money + payroll state both complete
+  | "failed"              // transfer failed before money moved
+  | "recovery_required";  // manual sync needed
+
 export interface PayrollTransferRecord {
   id: string;
   employerWallet: string;
@@ -80,7 +100,7 @@ export interface PayrollTransferRecord {
   amount: number;
   recipientAddress?: string;
   txSignature?: string;
-  status: "pending" | "success" | "failed";
+  status: TransferStatus;
   errorMessage?: string;
   privacyConfig?: {
     visibility?: "private";
@@ -92,7 +112,34 @@ export interface PayrollTransferRecord {
     provider?: "magicblock";
     sendTo?: string;
     clientRefId?: string;
+    settleAmountMicro?: string;
+    privatePayrollVersionBefore?: string;
+    accruedUnpaidBeforeMicro?: string;
+    totalPaidPrivateBeforeMicro?: string;
   };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type OnChainClaimStatus = 
+  | "requested"
+  | "paying"
+  | "paid"
+  | "failed"
+  | "needs_sync"
+  | "cancelled";
+
+export interface OnChainClaimRecord {
+  id: string; // The database ID (could just be a UUID)
+  streamId: string;
+  payrollPda: string;
+  employeeWallet: string;
+  claimId: number; // u64 claim_id emitted by the Rust program
+  amountMicro: number;
+  requestTxSignature: string;
+  paymentTxSignature?: string | null;
+  markPaidTxSignature?: string | null;
+  status: OnChainClaimStatus;
   createdAt: string;
   updatedAt: string;
 }
@@ -139,6 +186,7 @@ export interface PayrollStoreData {
   streams: PayrollStreamRecord[];
   transfers: PayrollTransferRecord[];
   cashoutRequests: CashoutRequestRecord[];
+  onChainClaims: OnChainClaimRecord[];
   auditorTokens: AuditorTokenRecord[];
 }
 
@@ -156,6 +204,14 @@ export interface CreateEmployeeInput {
   weeklyHours?: number;
   monthlySalaryUsd?: number;
   startDate?: string | null;
+}
+
+export interface UpdateEmployeePrivateRecipientInitStateInput {
+  employeeWallet: string;
+  status: PrivateRecipientInitStatus;
+  timestamp?: string;
+  txSignature?: string | null;
+  error?: string | null;
 }
 
 export interface CreateStreamInput {
@@ -214,7 +270,7 @@ export interface UpdateStreamRuntimeStateInput {
   recipientPrivateInitializedAt?: string | null;
   checkpointCrankTaskId?: string | null;
   checkpointCrankSignature?: string | null;
-  checkpointCrankStatus?: "idle" | "pending" | "active" | "failed" | "stopped";
+  checkpointCrankStatus?: CheckpointCrankStatus;
   checkpointCrankUpdatedAt?: string | null;
   lastPaidAt?: string | null;
   totalPaid?: number;
@@ -334,6 +390,14 @@ async function cashoutRequestsCollection(): Promise<
   return (await getDb()).collection<CashoutRequestDoc>("cashout_requests");
 }
 
+type OnChainClaimDoc = Omit<OnChainClaimRecord, "id"> & { _id: string };
+
+async function onChainClaimsCollection(): Promise<
+  Collection<OnChainClaimDoc>
+> {
+  return (await getDb()).collection<OnChainClaimDoc>("on_chain_claims");
+}
+
 async function auditorTokensCollection(): Promise<Collection<AuditorTokenDoc>> {
   return (await getDb()).collection<AuditorTokenDoc>("auditor_tokens");
 }
@@ -368,7 +432,7 @@ async function touchEmployer(employerWallet: string) {
 }
 
 export async function getPayrollStore(): Promise<PayrollStoreData> {
-  const [employers, employees, streams, transfers, cashoutRequests, auditorTokens] =
+  const [employers, employees, streams, transfers, cashoutRequests, auditorTokens, onChainClaims] =
     await Promise.all([
       (await employersCollection()).find({}).sort({ createdAt: 1 }).toArray(),
       (await employeesCollection()).find({}).sort({ createdAt: 1 }).toArray(),
@@ -382,6 +446,10 @@ export async function getPayrollStore(): Promise<PayrollStoreData> {
         .find({})
         .sort({ createdAt: 1 })
         .toArray(),
+      (await onChainClaimsCollection())
+        .find({})
+        .sort({ createdAt: 1 })
+        .toArray(),
     ]);
 
   return {
@@ -391,6 +459,10 @@ export async function getPayrollStore(): Promise<PayrollStoreData> {
     transfers: transfers.map(({ ...doc }) => doc),
     cashoutRequests: cashoutRequests.map(({ ...doc }) => doc),
     auditorTokens: auditorTokens.map(({ ...doc }) => doc),
+    onChainClaims: onChainClaims.map(({ _id, ...doc }) => ({
+      ...doc,
+      id: _id as unknown as string,
+    })),
   };
 }
 
@@ -480,6 +552,12 @@ export async function createEmployee(input: CreateEmployeeInput) {
     monthlySalaryUsd,
     startDate,
     privateRecipientInitializedAt: null,
+    privateRecipientInitStatus: "pending",
+    privateRecipientInitRequestedAt: timestamp,
+    privateRecipientInitLastAttemptAt: null,
+    privateRecipientInitConfirmedAt: null,
+    privateRecipientInitTxSignature: null,
+    privateRecipientInitError: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -501,6 +579,43 @@ export async function getEmployeeById(
   });
 }
 
+export async function deleteEmployeeById(
+  employerWallet: string,
+  employeeId: string,
+) {
+  const wallet = assertWallet(employerWallet, "Employer wallet");
+  const employeeCollection = await employeesCollection();
+  const streamCollection = await streamsCollection();
+
+  const employee = await employeeCollection.findOne({
+    employerWallet: wallet,
+    id: employeeId,
+  });
+
+  if (!employee) {
+    return {
+      employeeDeleted: false,
+      streamsDeleted: 0,
+    };
+  }
+
+  const [, streamDeleteResult] = await Promise.all([
+    employeeCollection.deleteOne({
+      employerWallet: wallet,
+      id: employeeId,
+    }),
+    streamCollection.deleteMany({
+      employerWallet: wallet,
+      employeeId,
+    }),
+  ]);
+
+  return {
+    employeeDeleted: true,
+    streamsDeleted: streamDeleteResult.deletedCount ?? 0,
+  };
+}
+
 export async function getStreamById(employerWallet: string, streamId: string) {
   const wallet = assertWallet(employerWallet, "Employer wallet");
   const collection = await streamsCollection();
@@ -509,6 +624,11 @@ export async function getStreamById(employerWallet: string, streamId: string) {
     employerWallet: wallet,
     id: streamId,
   });
+}
+
+export async function getStreamByStreamId(streamId: string) {
+  const collection = await streamsCollection();
+  return collection.findOne({ id: streamId });
 }
 
 export async function listActiveStreams(employerWallet?: string) {
@@ -873,6 +993,7 @@ export async function updateStreamRuntimeState(
 export async function markEmployeePrivateRecipientInitialized(
   employeeWallet: string,
   initializedAt = nowIso(),
+  txSignature?: string | null,
 ) {
   const wallet = assertWallet(employeeWallet, "Employee wallet");
   const employees = await listEmployeesByWallet(wallet);
@@ -889,6 +1010,11 @@ export async function markEmployeePrivateRecipientInitialized(
     {
       $set: {
         privateRecipientInitializedAt: initializedAt,
+        privateRecipientInitStatus: "confirmed",
+        privateRecipientInitLastAttemptAt: initializedAt,
+        privateRecipientInitConfirmedAt: initializedAt,
+        privateRecipientInitTxSignature: txSignature ?? null,
+        privateRecipientInitError: null,
         updatedAt: initializedAt,
       },
     },
@@ -913,6 +1039,54 @@ export async function markEmployeePrivateRecipientInitialized(
     employeeWallet: wallet,
     initializedAt,
     employersUpdated: employees.length,
+  };
+}
+
+export async function updateEmployeePrivateRecipientInitState(
+  input: UpdateEmployeePrivateRecipientInitStateInput,
+) {
+  const wallet = assertWallet(input.employeeWallet, "Employee wallet");
+  const employees = await listEmployeesByWallet(wallet);
+
+  if (employees.length === 0) {
+    throw new Error("Employee not found for this wallet");
+  }
+
+  const timestamp = input.timestamp ?? nowIso();
+  const employeeCollection = await employeesCollection();
+  const updateFields: Partial<EmployeeDoc> & { updatedAt: string } = {
+    privateRecipientInitStatus: input.status,
+    privateRecipientInitLastAttemptAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  if (input.status === "processing") {
+    updateFields.privateRecipientInitError = null;
+  }
+
+  if (input.status === "failed") {
+    updateFields.privateRecipientInitError =
+      input.error?.trim() || "Private account initialization failed";
+  } else if (input.error === null) {
+    updateFields.privateRecipientInitError = null;
+  }
+
+  if (input.txSignature !== undefined) {
+    updateFields.privateRecipientInitTxSignature = input.txSignature;
+  }
+
+  await employeeCollection.updateMany(
+    { wallet },
+    {
+      $set: updateFields,
+    },
+  );
+
+  return {
+    employeeWallet: wallet,
+    status: input.status,
+    employeesUpdated: employees.length,
+    updatedAt: timestamp,
   };
 }
 
@@ -956,10 +1130,54 @@ export async function listTransfers(employerWallet: string) {
     .toArray();
 }
 
+export async function findTransfersByEmployee(employeeId: string) {
+  return (await transfersCollection())
+    .find({ employeeId })
+    .sort({ createdAt: -1 })
+    .toArray();
+}
+
+export async function sumSuccessfulTransferAmountMicroForStream(streamId: string) {
+  const collection = await transfersCollection();
+  const rows = await collection
+    .find({ streamId, status: "success" })
+    .project<{ amount: number }>({ amount: 1 })
+    .toArray();
+
+  return rows.reduce((sum, row) => {
+    const amountMicro = Math.round((row.amount ?? 0) * 1_000_000);
+    return Number.isSafeInteger(amountMicro) && amountMicro > 0
+      ? sum + BigInt(amountMicro)
+      : sum;
+  }, BigInt(0));
+}
+
+export async function findUnsettledTransfer(streamId: string) {
+  const collection = await transfersCollection();
+  return collection.findOne({
+    streamId,
+    status: { $in: ["transfer_pending", "transfer_sent", "recovery_required"] },
+  });
+}
+
+export async function updateTransferStatus(
+  transferId: string,
+  status: TransferStatus,
+  txSignature?: string,
+) {
+  const collection = await transfersCollection();
+  const updateDoc: any = { status, updatedAt: nowIso() };
+  if (txSignature) {
+    updateDoc.txSignature = txSignature;
+  }
+
+  await collection.updateOne({ id: transferId }, { $set: updateDoc });
+}
+
 export async function updateTransferRecord(
   id: string,
   updates: Partial<
-    Pick<PayrollTransferRecord, "status" | "txSignature" | "errorMessage">
+    Pick<PayrollTransferRecord, "status" | "txSignature" | "errorMessage" | "providerMeta">
   >,
 ) {
   const collection = await transfersCollection();
@@ -987,10 +1205,19 @@ export async function updateTransferRecord(
   };
 }
 
-export async function listCashoutRequestsForEmployer(employerWallet: string) {
+export async function listCashoutRequestsForEmployer(
+  employerWallet: string,
+  streamId?: string,
+) {
   const wallet = assertWallet(employerWallet, "Employer wallet");
+  const filter: { employerWallet: string; streamId?: string } = {
+    employerWallet: wallet,
+  };
+  if (streamId?.trim()) {
+    filter.streamId = streamId.trim();
+  }
   return (await cashoutRequestsCollection())
-    .find({ employerWallet: wallet })
+    .find(filter)
     .sort({ createdAt: -1 })
     .toArray();
 }
@@ -1304,4 +1531,123 @@ export async function revokeAuditorToken(
   }
 
   return true;
+}
+
+// -----------------------------------------------------------------------------
+// On-Chain Claims API
+// -----------------------------------------------------------------------------
+
+export async function createOnChainClaim(input: {
+  streamId: string;
+  payrollPda: string;
+  employeeWallet: string;
+  claimId: number;
+  amountMicro: number;
+  requestTxSignature: string;
+}) {
+  const collection = await onChainClaimsCollection();
+  
+  const id = crypto.randomUUID();
+  const timestamp = nowIso();
+
+  const record: OnChainClaimRecord = {
+    id,
+    streamId: input.streamId,
+    payrollPda: input.payrollPda,
+    employeeWallet: input.employeeWallet,
+    claimId: input.claimId,
+    amountMicro: input.amountMicro,
+    requestTxSignature: input.requestTxSignature,
+    status: "requested",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  await collection.insertOne({ ...record, _id: id } as any);
+  return record;
+}
+
+export async function listOnChainClaimsForEmployee(employeeWallet: string) {
+  const collection = await onChainClaimsCollection();
+  const docs = await collection
+    .find({ employeeWallet })
+    .sort({ createdAt: -1 })
+    .toArray();
+    
+  return docs.map(doc => {
+    const { _id, ...rest } = doc;
+    return { ...rest, id: _id };
+  });
+}
+
+export async function listOnChainClaimsForStream(streamId: string) {
+  const collection = await onChainClaimsCollection();
+  const docs = await collection
+    .find({ streamId })
+    .sort({ createdAt: -1 })
+    .toArray();
+    
+  return docs.map(doc => {
+    const { _id, ...rest } = doc;
+    return { ...rest, id: _id };
+  });
+}
+
+export async function listOnChainClaimsForEmployer(
+  employerWallet: string,
+  streamId?: string,
+) {
+  const streamIds = streamId?.trim()
+    ? [streamId.trim()]
+    : (await listActiveStreams(employerWallet)).map((s) => s.id);
+
+  if (streamIds.length === 0) {
+    return [];
+  }
+  
+  const collection = await onChainClaimsCollection();
+  const docs = await collection
+    .find({ streamId: { $in: streamIds } })
+    .sort({ createdAt: -1 })
+    .toArray();
+    
+  return docs.map(doc => {
+    const { _id, ...rest } = doc;
+    return { ...rest, id: _id };
+  });
+}
+
+export async function getPendingOnChainClaim(streamId: string) {
+  const collection = await onChainClaimsCollection();
+  const doc = await collection.findOne({
+    streamId,
+    status: { $in: ["requested", "paying", "needs_sync", "failed"] }
+  });
+  if (!doc) return null;
+  const { _id, ...rest } = doc;
+  return { ...rest, id: _id };
+}
+
+export async function getOnChainClaimById(id: string) {
+  const collection = await onChainClaimsCollection();
+  const doc = await collection.findOne({ _id: id } as any);
+  if (!doc) return null;
+  const { _id, ...rest } = doc;
+  return { ...rest, id: _id };
+}
+
+export async function updateOnChainClaim(id: string, updates: Partial<OnChainClaimRecord>) {
+  const collection = await onChainClaimsCollection();
+  
+  const updatePayload = {
+    ...updates,
+    updatedAt: nowIso()
+  };
+
+  await collection.updateOne(
+    { _id: id } as any,
+    { $set: updatePayload }
+  );
+
+  return getOnChainClaimById(id);
 }

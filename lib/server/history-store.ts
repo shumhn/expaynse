@@ -16,6 +16,10 @@ export interface ProviderMetaRecord {
   provider?: "magicblock";
   sendTo?: string;
   clientRefId?: string;
+  action?: "employee-withdrawal" | "employee-private-transfer" | "claim";
+  destinationWallet?: string;
+  creditVerified?: boolean;
+  errorMessage?: string;
 }
 
 export interface PayrollRun {
@@ -49,7 +53,7 @@ export interface ClaimRecord {
   amount: number;
   recipient: string;
   txSig?: string;
-  status: "success" | "failed";
+  status: "success" | "failed" | "submitted";
   privacyConfig?: PrivacyConfigRecord;
   providerMeta?: ProviderMetaRecord;
 }

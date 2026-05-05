@@ -8,7 +8,12 @@ import {
 import {
   listEmployeesByWallet,
   markEmployeePrivateRecipientInitialized,
+  type PrivateRecipientInitStatus,
 } from "@/lib/server/payroll-store";
+import {
+  isWalletAuthorizationError,
+  verifyAuthorizedWalletRequest,
+} from "@/lib/wallet-request-auth";
 
 function badRequest(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
@@ -33,6 +38,7 @@ type BuildEmployeePrivateInitBody = {
 type FinalizeEmployeePrivateInitBody = {
   employeeWallet?: string;
   initializedAt?: string;
+  txSignature?: string;
   teeAuthToken?: string;
 };
 
@@ -50,6 +56,12 @@ type EmployeePrivateInitStatusResponse = {
   employeeWallet: string;
   registered: boolean;
   initialized: boolean;
+  status: PrivateRecipientInitStatus | "unregistered";
+  requestedAt: string | null;
+  lastAttemptAt: string | null;
+  confirmedAt: string | null;
+  txSignature: string | null;
+  error: string | null;
   message: string;
 };
 
@@ -71,19 +83,44 @@ export async function GET(request: NextRequest) {
 
     const employees = await listEmployeesByWallet(employeeWallet);
     const registered = employees.length > 0;
-    const initialized = employees.some(
-      (employee) => !!employee.privateRecipientInitializedAt,
+    const initializedEmployee =
+      employees.find((employee) => !!employee.privateRecipientInitializedAt) ??
+      employees.find(
+        (employee) => employee.privateRecipientInitStatus === "confirmed",
+      ) ??
+      employees[0] ??
+      null;
+    const initialized = !!(
+      initializedEmployee?.privateRecipientInitializedAt ||
+      initializedEmployee?.privateRecipientInitStatus === "confirmed"
     );
+    const status = !registered
+      ? "unregistered"
+      : initializedEmployee?.privateRecipientInitStatus ?? "pending";
+    const message = !registered
+      ? "This wallet is not registered as a Expaynse employee yet."
+      : initialized
+        ? "Private payroll account is initialized."
+        : status === "processing"
+          ? "Private payroll account initialization is in progress."
+          : status === "failed"
+            ? "Private payroll account initialization failed and needs retry."
+            : "Private payroll account is not initialized yet.";
 
     const response: EmployeePrivateInitStatusResponse = {
       employeeWallet,
       registered,
       initialized,
-      message: !registered
-        ? "This wallet is not registered as a Expaynse employee yet."
-        : initialized
-          ? "Private payroll account is initialized."
-          : "Private payroll account is not initialized yet.",
+      status,
+      requestedAt: initializedEmployee?.privateRecipientInitRequestedAt ?? null,
+      lastAttemptAt: initializedEmployee?.privateRecipientInitLastAttemptAt ?? null,
+      confirmedAt:
+        initializedEmployee?.privateRecipientInitConfirmedAt ??
+        initializedEmployee?.privateRecipientInitializedAt ??
+        null,
+      txSignature: initializedEmployee?.privateRecipientInitTxSignature ?? null,
+      error: initializedEmployee?.privateRecipientInitError ?? null,
+      message,
     };
 
     return successResponse(response);
@@ -99,11 +136,19 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as BuildEmployeePrivateInitBody;
+    const rawBody = await request.text();
+    const body = JSON.parse(rawBody || "{}") as BuildEmployeePrivateInitBody;
     const employeeWallet = assertWallet(
       body.employeeWallet ?? "",
       "Employee wallet",
     );
+    await verifyAuthorizedWalletRequest({
+      headers: request.headers,
+      expectedWallet: employeeWallet,
+      method: request.method,
+      path: request.nextUrl.pathname,
+      body: rawBody,
+    });
     const employees = await listEmployeesByWallet(employeeWallet);
 
     if (employees.length === 0) {
@@ -143,24 +188,34 @@ export async function POST(request: NextRequest) {
         ? error.message
         : "Failed to build employee private initialization";
 
-    return badRequest(message);
+    return badRequest(message, isWalletAuthorizationError(error) ? 401 : 400);
   }
 }
 
 export async function PATCH(request: NextRequest) {
   try {
-    const body = (await request.json()) as FinalizeEmployeePrivateInitBody;
+    const rawBody = await request.text();
+    const body = JSON.parse(rawBody || "{}") as FinalizeEmployeePrivateInitBody;
     const employeeWallet = assertWallet(
       body.employeeWallet ?? "",
       "Employee wallet",
     );
+    await verifyAuthorizedWalletRequest({
+      headers: request.headers,
+      expectedWallet: employeeWallet,
+      method: request.method,
+      path: request.nextUrl.pathname,
+      body: rawBody,
+    });
     const initializedAt =
       body.initializedAt?.trim() || new Date().toISOString();
+    const txSignature = body.txSignature?.trim() || null;
     const teeAuthToken = body.teeAuthToken?.trim();
 
     const result = await markEmployeePrivateRecipientInitialized(
       employeeWallet,
       initializedAt,
+      txSignature,
     );
 
     let privateBalance: BalanceResponse | null = null;
@@ -187,6 +242,6 @@ export async function PATCH(request: NextRequest) {
         ? error.message
         : "Failed to finalize employee private initialization";
 
-    return badRequest(message);
+    return badRequest(message, isWalletAuthorizationError(error) ? 401 : 400);
   }
 }
