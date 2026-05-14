@@ -42,10 +42,13 @@ next-env.d.ts
 
 # local scratch / generated artifacts
 scratch/
-payroll1-rust/scratch/
-payroll1-rust/keys/
 outputs/
 .fix-*.sh
 *.log
 ephemeral✓
 .env*.local
+.anchor/
+target/
+test-ledger/
+keys/
+contracts/payroll/
