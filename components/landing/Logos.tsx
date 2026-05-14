@@ -1,6 +1,6 @@
 "use client";
 
-import { motion } from "framer-motion";
+import Image from "next/image";
 
 const textLogos = [
     "Per-Second Streaming",
@@ -14,7 +14,7 @@ const textLogos = [
 
 const brandLogos = [
     { name: "MagicBlock", src: "/magicblock-logo.png" },
-    { name: "Solana", src: "/solanaLogo.png" },
+    { name: "Solana", src: "/solana-logo.png" },
 ];
 
 export function Logos() {
@@ -34,7 +34,7 @@ export function Logos() {
                     {[...items, ...items, ...items].map((item, i) => (
                         item.type === "brand" ? (
                             <span key={i} className="inline-flex items-center gap-2.5 text-2xl font-normal text-white uppercase tracking-tight hover:text-kast-teal transition-colors cursor-default">
-                                <img src={item.src} alt={item.name} className="w-7 h-7 rounded-md" />
+                                <Image src={item.src} alt={item.name} width={28} height={28} className="rounded-md" />
                                 {item.name}
                             </span>
                         ) : (

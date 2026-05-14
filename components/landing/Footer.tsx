@@ -1,14 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowUpRight } from "lucide-react";
+import Image from "next/image";
 import { Logo } from "@/components/landing/Logo";
 
 export function Footer() {
     return (
         <footer className="relative bg-black border-t border-white/5 py-24 px-6 overflow-hidden">
             <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start gap-16">
-                {/* Brand Section */}
                 <div className="space-y-8 flex-1">
                     <div className="flex items-center gap-4">
                         <Logo className="w-16 h-16" />
@@ -22,7 +21,6 @@ Privacy-first real-time payroll streaming on Solana. Pay employees every second 
                     </p>
                 </div>
 
-                {/* Links Grid - Compact Right Aligned */}
                 <div className="grid grid-cols-2 sm:grid-cols-2 gap-12 md:gap-16">
                     <FooterColumn
                         title="Ecosystem"
@@ -42,7 +40,6 @@ Privacy-first real-time payroll streaming on Solana. Pay employees every second 
                 </div>
             </div>
 
-            {/* Bottom Bar */}
             <div className="max-w-7xl mx-auto mt-24 pt-8 border-t border-white/5 flex flex-col md:flex-row justify-between items-center gap-6 text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-600">
                 <div className="flex items-center gap-8">
                     <p>© 2026 Expaynse Labs</p>
@@ -50,8 +47,8 @@ Privacy-first real-time payroll streaming on Solana. Pay employees every second 
                 </div>
 
                 <div className="flex items-center gap-4">
-                    <img src="/magicblock-logo.png" alt="MagicBlock" className="w-5 h-5 rounded opacity-50" />
-                    <img src="/solanaLogo.png" alt="Solana" className="w-4 h-4 opacity-50" />
+                    <Image src="/magicblock-logo.png" alt="MagicBlock" width={20} height={20} className="rounded opacity-50" />
+                    <Image src="/solana-logo.png" alt="Solana" width={16} height={16} className="opacity-50" />
                 </div>
 
                 <div className="flex items-center gap-6 cursor-default">

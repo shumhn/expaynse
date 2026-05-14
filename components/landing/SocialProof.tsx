@@ -39,14 +39,12 @@ export function SocialProof() {
         <section className="pt-24 pb-24 px-6 bg-black overflow-hidden border-t border-white/5 relative">
             <div className="max-w-7xl mx-auto relative z-10">
                 <div className="flex flex-col lg:flex-row gap-16 items-center">
-                    {/* Testimonials Grid - Uniform Cards */}
                     <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-6">
                         {testimonials.map((testimonial, index) => (
                             <TestimonialCard key={index} data={testimonial} index={index} />
                         ))}
                     </div>
 
-                    {/* Right Side - Large Brand Message */}
                     <div className="w-full lg:w-[400px] flex flex-col justify-center items-center lg:items-end text-center lg:text-right">
                         <motion.div
                             initial={{ opacity: 0, x: 50 }}
@@ -100,7 +98,6 @@ export function SocialProof() {
                 </div>
             </div>
 
-            {/* Background Atmosphere */}
             <div className="absolute top-1/2 right-0 w-[600px] h-[600px] bg-kast-teal/5 rounded-full blur-[140px] pointer-events-none" />
         </section>
     );

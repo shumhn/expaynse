@@ -38,7 +38,6 @@ export function FAQ() {
         <section className="py-24 px-6 bg-black border-t border-white/5">
             <div className="max-w-7xl mx-auto">
                 <div className="flex flex-col lg:flex-row gap-16 lg:gap-24">
-                    {/* Left Side - Title */}
                     <motion.div
                         className="lg:w-[300px] flex-shrink-0"
                         initial={{ opacity: 0, x: -30 }}
@@ -50,7 +49,6 @@ export function FAQ() {
                         </h2>
                     </motion.div>
 
-                    {/* Right Side - Accordion */}
                     <div className="flex-1 space-y-0">
                         {faqs.map((faq, index) => (
                             <FAQItem
