@@ -31,13 +31,10 @@
     "check:payroll:idl-parity": "node ./scripts/check-payroll-idl-parity.js"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.53",
     "@coral-xyz/anchor": "^0.32.1",
-    "@ledgerhq/errors": "^6.34.0",
     "@magicblock-labs/ephemeral-rollups-sdk": "^0.10.9",
     "@phosphor-icons/react": "^2.1.10",
     "@radix-ui/react-toast": "^1.2.15",
-    "@radr/shadowwire": "^1.1.15",
     "@solana/spl-token": "^0.4.14",
     "@solana/wallet-adapter-base": "^0.9.27",
     "@solana/wallet-adapter-react": "^0.15.39",
@@ -45,7 +42,6 @@
     "@solana/wallet-adapter-wallets": "^0.19.38",
     "@solana/web3.js": "^1.98.4",
     "@types/bn.js": "^5.2.0",
-    "ai": "^6.0.168",
     "bn.js": "^5.2.3",
     "bs58": "^6.0.0",
     "canvas-confetti": "^1.9.4",
@@ -67,7 +63,6 @@
     "tailwind-merge": "^3.5.0",
     "tailwindcss-animate": "^1.0.7",
     "tweetnacl": "^1.0.3",
-    "vercel": "^52.2.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {
