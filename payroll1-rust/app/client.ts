@@ -150,10 +150,7 @@ export class PayrollClient {
     amountSOL: number,
     teeToken: string
   ): Promise<unknown> {
-    console.log("Initializing Mint privately...");
     await initializeMint(employerKey, teeToken);
-
-    console.log(`Depositing ${amountSOL} tokens into Employer's TEE Vault...`);
     const result = await deposit(employerKey, amountSOL, teeToken);
 
     return result;
