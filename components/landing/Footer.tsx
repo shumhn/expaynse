@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import Image from "next/image";
 import { Logo } from "@/components/landing/Logo";
 
 export function Footer() {
@@ -44,11 +43,6 @@ Privacy-first real-time payroll streaming on Solana. Pay employees every second 
                 <div className="flex items-center gap-8">
                     <p>© 2026 Expaynse Labs</p>
                     <p className="hidden md:block">The future of payroll is real-time.</p>
-                </div>
-
-                <div className="flex items-center gap-4">
-                    <Image src="/magicblock-logo.png" alt="MagicBlock" width={20} height={20} className="rounded opacity-50" />
-                    <Image src="/solana-logo.png" alt="Solana" width={16} height={16} className="opacity-50" />
                 </div>
 
                 <div className="flex items-center gap-6 cursor-default">
