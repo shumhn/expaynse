@@ -150,7 +150,7 @@ export async function POST(request: NextRequest) {
       body: rawBody,
     });
 
-    // Verify no pending claim exists
+    // Invariant: only one pending claim per stream at a time.
     const existingPending = await getPendingOnChainClaim(streamId);
     if (existingPending) {
       return badRequest("A pending claim already exists for this stream");
@@ -371,7 +371,7 @@ export async function GET(request: NextRequest) {
     }
 
     return badRequest("streamId is required");
-  } catch (error: unknown) {
+  } catch {
     return badRequest("Failed to get claims", 500);
   }
 }

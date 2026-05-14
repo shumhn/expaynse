@@ -17,6 +17,16 @@ import Link from "next/link";
 import { EmployerLayout } from "@/components/employer-layout";
 import { useClaimData } from "@/components/claim/use-claim-data";
 import { computeLiveClaimableAmountMicro } from "@/components/claim/claim-utils";
+import {
+  formatDisplayedUsdcBalance,
+  getClaimDisabledReason,
+  getClaimErrorMessage,
+} from "@/components/claim/claim-helpers";
+import type {
+  ClaimCashoutRequest,
+  ClaimWithdrawHistoryRecord,
+  OnChainPendingClaim,
+} from "@/components/claim/claim-types";
 import { toast } from "sonner";
 import { PublicKey } from "@solana/web3.js";
 import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
@@ -26,12 +36,6 @@ import {
   privateTransfer,
   signAndSend,
 } from "@/lib/magicblock-api";
-
-function formatDisplayedUsdcBalance(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return "0.00";
-  if (value >= 0.01) return value.toFixed(2);
-  return value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
-}
 
 export default function ClaimWithdrawPage() {
   const {
@@ -43,8 +47,6 @@ export default function ClaimWithdrawPage() {
     loading,
     privateAccountInitialized,
     registeredEmployeeWallet,
-    privateInitStatus,
-    privateInitError,
     initializingPrivateAccount,
     withdrawing,
     setWithdrawing,
@@ -60,47 +62,12 @@ export default function ClaimWithdrawPage() {
   const [withdrawRecipient, setWithdrawRecipient] = useState<string>("");
   const [withdrawSyncNotice, setWithdrawSyncNotice] = useState<string>("");
   const [requestAmount, setRequestAmount] = useState<string>("");
-  const [requestMode, setRequestMode] = useState<"base" | "ephemeral">("base");
-  const [requestDestination, setRequestDestination] = useState<string>("");
-  const [requestNote, setRequestNote] = useState<string>("");
   const [submittingRequest, setSubmittingRequest] = useState<boolean>(false);
   const [loadingRequests, setLoadingRequests] = useState<boolean>(false);
   const [loadingWithdrawHistory, setLoadingWithdrawHistory] = useState<boolean>(false);
-  const [cashoutRequests, setCashoutRequests] = useState<
-    Array<{
-      id: string;
-      requestedAmount: number;
-      status: "pending" | "fulfilled" | "dismissed" | "cancelled";
-      payoutMode?: "base" | "ephemeral";
-      createdAt: string;
-      note?: string;
-    }>
-  >([]);
-  const [withdrawHistory, setWithdrawHistory] = useState<
-    Array<{
-      id: string;
-      date: string;
-      amount: number;
-      recipient: string;
-      txSig?: string;
-      status: "success" | "failed" | "submitted";
-      providerMeta?: {
-        action?:
-          | "employee-withdrawal"
-          | "employee-external-transfer"
-          | "employee-private-transfer"
-          | "claim";
-        destinationWallet?: string;
-        creditVerified?: boolean;
-        errorMessage?: string;
-      };
-      privacyConfig?: {
-        fromBalance?: "base" | "ephemeral";
-        toBalance?: "base" | "ephemeral";
-      };
-    }>
-  >([]);
-  const [onChainPendingClaim, setOnChainPendingClaim] = useState<any | null>(null);
+  const [cashoutRequests, setCashoutRequests] = useState<ClaimCashoutRequest[]>([]);
+  const [withdrawHistory, setWithdrawHistory] = useState<ClaimWithdrawHistoryRecord[]>([]);
+  const [onChainPendingClaim, setOnChainPendingClaim] = useState<OnChainPendingClaim | null>(null);
 
   useEffect(() => {
     if (publicKey) {
@@ -115,21 +82,21 @@ export default function ClaimWithdrawPage() {
     fetchEmployeePayrollSummary,
   ]);
 
-  const getErrorMessage = (error: unknown) => {
-    if (error instanceof Error) return error.message;
-    return "Unknown error";
-  };
-
+  const effectivePrivBalance = privBalance ?? "0";
   useEffect(() => {
-    setVisiblePrivBalance(privBalance);
+    const timeoutId = window.setTimeout(() => {
+      setVisiblePrivBalance(privBalance);
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
   }, [privBalance]);
 
-  const effectivePrivBalance = visiblePrivBalance ?? privBalance ?? "0";
-  const privBalanceNum = parseFloat(effectivePrivBalance);
+  const effectiveVisiblePrivBalance = visiblePrivBalance ?? effectivePrivBalance;
+  const privBalanceNum = parseFloat(effectiveVisiblePrivBalance);
   const displayedPrivBalance = formatDisplayedUsdcBalance(privBalanceNum);
   const canUsePrivateBalance =
     privateAccountInitialized || privBalanceNum > 0;
   const primaryPayrollStream = payrollSummary?.streams?.[0];
+  const primaryStreamId = primaryPayrollStream?.stream?.id ?? null;
   const hasPrivatePayrollMode =
     payrollSummary?.employees?.some(
       (employee) => employee.payrollMode === "private_payroll",
@@ -165,35 +132,15 @@ export default function ClaimWithdrawPage() {
   ]);
   const pendingRequest = cashoutRequests.find((r) => r.status === "pending");
   const hasPendingRequest = !!pendingRequest || !!onChainPendingClaim;
-  const employeeClaimState = !registeredEmployeeWallet
-    ? "not_registered"
-    : !canUsePrivateBalance
-      ? "needs_private_init"
-      : hasPendingRequest
-        ? "claim_pending"
-        : privBalanceNum > 0
-          ? "balance_available"
-          : hasLiveSnapshot
-            ? "ready_to_claim"
-            : "waiting_for_employer";
-
-  const claimDisabledReason = !registeredEmployeeWallet
-    ? "Your employer still needs to add this wallet to payroll."
-    : !privateAccountInitialized
-      ? "Set up your private account once before you claim salary."
-      : !primaryPayrollStream?.stream?.id
-        ? hasPrivatePayrollMode
-          ? "Your employer has not sent a private payroll payout yet."
-          : "Your payroll stream is not ready yet."
-        : hasPendingRequest
-          ? "Finish your pending claim before starting a new one."
-          : !hasLiveSnapshot
-            ? hasPrivatePayrollMode
-              ? "Your employer still needs to send a private payroll payout."
-              : "Your employer still needs to finish private payroll setup."
-            : requestMaxUsdc <= 0
-              ? "No salary is available to claim yet."
-              : null;
+  const claimDisabledReason = getClaimDisabledReason({
+    registeredEmployeeWallet,
+    privateAccountInitialized,
+    hasPrimaryStreamId: Boolean(primaryStreamId),
+    hasPrivatePayrollMode,
+    hasPendingRequest,
+    hasLiveSnapshot,
+    requestMaxUsdc,
+  });
 
   const fetchCashoutRequests = useCallback(
     async (silent = true) => {
@@ -206,28 +153,29 @@ export default function ClaimWithdrawPage() {
           path: `/api/cashout-requests?scope=employee&employeeWallet=${publicKey.toBase58()}`,
         });
         const json = (await response.json()) as {
-          requests?: any[];
+          requests?: ClaimCashoutRequest[];
           error?: string;
         };
         if (!response.ok)
           throw new Error(json.error || "Failed to load requests");
         setCashoutRequests(json.requests ?? []);
 
-        if (primaryPayrollStream?.stream?.id) {
-          const claimRes = await fetch(`/api/claim-salary/request?streamId=${primaryPayrollStream.stream.id}`);
-          const claimJson = await claimRes.json();
+        if (primaryStreamId) {
+          const claimRes = await fetch(`/api/claim-salary/request?streamId=${primaryStreamId}`);
+          const claimJson = (await claimRes.json()) as {
+            pendingClaim?: OnChainPendingClaim | null;
+          };
           if (claimRes.ok) {
             setOnChainPendingClaim(claimJson.pendingClaim || null);
           }
         }
       } catch (err: unknown) {
-        if (!silent)
-          toast.error(`Request history failed: ${getErrorMessage(err)}`);
+        if (!silent) toast.error(`Request history failed: ${getClaimErrorMessage(err)}`);
       } finally {
         if (!silent) setLoadingRequests(false);
       }
     },
-    [publicKey, signMessage, primaryPayrollStream?.stream?.id],
+    [publicKey, signMessage, primaryStreamId],
   );
 
   const fetchWithdrawHistory = useCallback(
@@ -278,7 +226,7 @@ export default function ClaimWithdrawPage() {
         setWithdrawHistory(items);
       } catch (err: unknown) {
         if (!silent) {
-          toast.error(`Withdraw history failed: ${getErrorMessage(err)}`);
+          toast.error(`Withdraw history failed: ${getClaimErrorMessage(err)}`);
         }
       } finally {
         if (!silent) setLoadingWithdrawHistory(false);
@@ -288,12 +236,12 @@ export default function ClaimWithdrawPage() {
   );
 
   useEffect(() => {
-    if (!publicKey || !signMessage || !primaryPayrollStream?.stream?.id) return undefined;
+    if (!publicKey || !signMessage || !primaryStreamId) return undefined;
     const timer = setTimeout(() => {
       void fetchCashoutRequests(true);
     }, 0);
     return () => clearTimeout(timer);
-  }, [publicKey, signMessage, primaryPayrollStream?.stream?.id, fetchCashoutRequests]);
+  }, [publicKey, signMessage, primaryStreamId, fetchCashoutRequests]);
 
   useEffect(() => {
     if (!publicKey || !signMessage) return undefined;
@@ -325,20 +273,33 @@ export default function ClaimWithdrawPage() {
 
   useEffect(() => {
     if (withdrawAmount.trim() === "") {
-      if (withdrawSyncNotice) setWithdrawSyncNotice("");
+      if (withdrawSyncNotice) {
+        const timeoutId = window.setTimeout(() => {
+          setWithdrawSyncNotice("");
+        }, 0);
+        return () => window.clearTimeout(timeoutId);
+      }
       return;
     }
     const parsedAmount = parseFloat(withdrawAmount);
     if (Number.isNaN(parsedAmount) || parsedAmount <= privBalanceNum) {
-      if (withdrawSyncNotice) setWithdrawSyncNotice("");
+      if (withdrawSyncNotice) {
+        const timeoutId = window.setTimeout(() => {
+          setWithdrawSyncNotice("");
+        }, 0);
+        return () => window.clearTimeout(timeoutId);
+      }
       return;
     }
-    setWithdrawAmount(privBalanceNum > 0 ? privBalanceNum.toFixed(6) : "");
-    setWithdrawSyncNotice(
-      privBalanceNum > 0
-        ? `Balance refreshed. Latest withdrawable amount is ${privBalanceNum.toFixed(6)} USDC.`
-        : "Balance refreshed. Your private balance is now empty.",
-    );
+    const timeoutId = window.setTimeout(() => {
+      setWithdrawAmount(privBalanceNum > 0 ? privBalanceNum.toFixed(6) : "");
+      setWithdrawSyncNotice(
+        privBalanceNum > 0
+          ? `Balance refreshed. Latest withdrawable amount is ${privBalanceNum.toFixed(6)} USDC.`
+          : "Balance refreshed. Your private balance is now empty.",
+      );
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
   }, [privBalanceNum, withdrawAmount, withdrawSyncNotice]);
 
   const isOwnWalletDestination = useMemo(() => {
@@ -494,7 +455,7 @@ export default function ClaimWithdrawPage() {
       });
       void fetchWithdrawHistory(true);
     } catch (err: unknown) {
-      const rawMessage = getErrorMessage(err);
+      const rawMessage = getClaimErrorMessage(err);
       const isPriorCreditError =
         rawMessage.includes(
           "Attempt to debit an account but found no record of a prior credit",
@@ -623,7 +584,7 @@ export default function ClaimWithdrawPage() {
       toast.success("Private vault initialized!");
       void fetchPrivateInitStatus({ silent: false });
     } catch (err: unknown) {
-      const message = getErrorMessage(err);
+      const message = getClaimErrorMessage(err);
       const isAlreadyInitializedLikeError =
         message.includes(
           "Attempt to debit an account but found no record of a prior credit",
@@ -671,7 +632,7 @@ export default function ClaimWithdrawPage() {
       const token = await getOrFetchToken();
       if (!token) throw new Error("Authentication failed");
 
-      // 1. Build request_withdrawal tx
+      // Build on-chain `request_withdrawal` transaction.
       const buildRes = await walletAuthenticatedFetch({
         wallet: publicKey.toBase58(),
         signMessage,
@@ -687,14 +648,14 @@ export default function ClaimWithdrawPage() {
       const buildJson = await buildRes.json();
       if (!buildRes.ok) throw new Error(buildJson.error || "Failed to build claim tx");
 
-      // 2. Sign and send to PER
+      // Sign with wallet and submit to the TEE endpoint.
       const signature = await signAndSend(
         buildJson.transactions.requestWithdrawal.transactionBase64,
         signTransaction,
         { sendTo: "ephemeral", rpcUrl: `https://devnet-tee.magicblock.app?token=${encodeURIComponent(token)}`, signMessage, publicKey }
       );
 
-      // 3. Save claim to DB
+      // Persist claim metadata so backend payout reconciliation can continue.
       const patchRes = await walletAuthenticatedFetch({
         wallet: publicKey.toBase58(),
         signMessage,
@@ -715,7 +676,7 @@ export default function ClaimWithdrawPage() {
       toast.success("Claim submitted successfully!");
       setRequestAmount("");
 
-      // 4. Trigger the backend to pay automatically
+      // Trigger server-side payout processing immediately after claim submission.
       toast.loading("Processing payout...", { id: "payout-toast" });
       const processRes = await walletAuthenticatedFetch({
         wallet: publicKey.toBase58(),
@@ -728,7 +689,7 @@ export default function ClaimWithdrawPage() {
           employeeWallet: publicKey.toBase58(),
         },
       });
-      const processJson = await processRes.json();
+      await processRes.json();
 
       if (!processRes.ok) {
         toast.error("Claim is stuck. Please click Sync Claim State later.", { id: "payout-toast" });
@@ -738,7 +699,7 @@ export default function ClaimWithdrawPage() {
 
       await fetchCashoutRequests(false);
     } catch (err: unknown) {
-      toast.error(`Claim failed: ${getErrorMessage(err)}`);
+      toast.error(`Claim failed: ${getClaimErrorMessage(err)}`);
     } finally {
       setSubmittingRequest(false);
     }
@@ -773,7 +734,7 @@ export default function ClaimWithdrawPage() {
       toast.success("Claim synced successfully!", { id: "sync-toast" });
       await fetchCashoutRequests(false);
     } catch (err: unknown) {
-      toast.error(`Sync failed: ${getErrorMessage(err)}`, { id: "sync-toast" });
+      toast.error(`Sync failed: ${getClaimErrorMessage(err)}`, { id: "sync-toast" });
     } finally {
       setSyncingClaim(false);
     }
@@ -809,7 +770,7 @@ export default function ClaimWithdrawPage() {
         fetchEmployeePayrollSummary({ silent: true, interactive: false }),
       ]);
     } catch (err: unknown) {
-      toast.error(`Cancel failed: ${getErrorMessage(err)}`, {
+      toast.error(`Cancel failed: ${getClaimErrorMessage(err)}`, {
         id: "cancel-claim-toast",
       });
     } finally {

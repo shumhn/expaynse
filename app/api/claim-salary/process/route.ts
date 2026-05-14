@@ -129,9 +129,9 @@ export async function POST(request: NextRequest) {
     }
 
     if (claim.status === "needs_sync") {
-      // The treasury transfer succeeded, but mark-paid failed. 
-      // Let's skip directly to mark-paid.
-      // But we need the paymentTxSignature to proceed.
+      // Recovery mode invariant:
+      // funds were sent previously, but on-chain mark-paid did not finalize.
+      // We can only resume if the original payment signature is still known.
       if (!claim.paymentTxSignature) {
         return badRequest("Claim needs sync but missing payment signature", 500);
       }
@@ -247,7 +247,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 1. Treasury Transfer (if not needs_sync)
+    // Step 1: execute treasury transfer unless this claim is in sync-recovery mode.
     let paymentTxSignature = claim.paymentTxSignature;
     if (claim.status !== "needs_sync") {
       let pendingTransferId = unsettled?.id;
@@ -279,15 +279,11 @@ export async function POST(request: NextRequest) {
       await updateOnChainClaim(claim.id, { status: "paying" });
 
       try {
-        console.log("=== TREASURY WALLET INFO ===");
-        console.log("Treasury Address:", treasuryKeypair.publicKey.toBase58());
-        console.log("============================");
-        
         const treasuryTransfer = await sendPayrollFromCompanyTreasury({
           treasuryKeypair,
           employeeWallet: claimEmployeeWallet,
           amountMicro,
-          clientRefId: clientRefId as string,
+          clientRefId: clientRefId ?? "",
           fromBalance: "ephemeral",
           toBalance: "ephemeral",
         });
@@ -305,8 +301,9 @@ export async function POST(request: NextRequest) {
         });
 
         await updateOnChainClaim(claim.id, { paymentTxSignature });
-      } catch (err: any) {
-        // Transfer failed, we can fail the claim and it can be cancelled later
+      } catch (err: unknown) {
+        // Transfer failure policy:
+        // keep claim in a recoverable failed state so it can be retried or cancelled.
         await updateOnChainClaim(claim.id, { status: "failed" });
         if (pendingTransferId) {
           await updateTransferRecord(pendingTransferId, {
@@ -318,7 +315,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 2. Mark Paid On-Chain
+    // Step 2: finalize payroll state on-chain via mark-paid.
     try {
       const connection = new Connection(
         `${TEE_URL}?token=${encodeURIComponent(teeAuthToken)}`,
@@ -333,9 +330,9 @@ export async function POST(request: NextRequest) {
       const program = new anchor.Program(idl, provider) as anchor.Program<Idl>;
       const methods = getMarkPrivateTransferPaidMethods(program);
 
-      // The payment_ref_hash in rust expects 32 bytes. We can just hash the signature or use a zero array if allowed.
-      // Wait, the rust program says: `require!(payment_ref_hash != [0u8; 32], PayrollError::InvalidPaymentRef);`
-      // So we must provide a non-zero 32-byte array. We'll use the first 32 bytes of the bs58 decoded signature, or a SHA256 of it.
+      // Rust invariant: `payment_ref_hash` must be a non-zero 32-byte value.
+      // We derive it as SHA256(payment signature) to keep deterministic linkage
+      // between transfer and mark-paid settlement.
       const hash = crypto.createHash("sha256").update(paymentTxSignature as string).digest();
       const paymentRefHashArray = Array.from(hash);
 
@@ -363,7 +360,7 @@ export async function POST(request: NextRequest) {
         skipPreflight: false,
       });
 
-      // Update transfer and claim to success/paid
+      // Persist final success states in both transfer and claim records.
       const latestUnsettled = await findUnsettledTransfer(stream.id);
       if (latestUnsettled) {
         await updateTransferRecord(latestUnsettled.id, {
@@ -381,9 +378,10 @@ export async function POST(request: NextRequest) {
         message: "Claim processed successfully",
         claim: updatedClaim,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("Mark private transfer paid failed:", err);
-      // The funds were transferred, but the on-chain mark paid failed.
+      // Failure policy:
+      // transfer already succeeded; keep claim as `needs_sync` for explicit repair.
       await updateOnChainClaim(claim.id, { status: "needs_sync" });
       const latestUnsettled = await findUnsettledTransfer(stream.id);
       if (latestUnsettled) {

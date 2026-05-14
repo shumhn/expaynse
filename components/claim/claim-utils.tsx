@@ -1,6 +1,6 @@
 
 import { Waves, PauseCircle, Ban } from "lucide-react";
-import { type EmployeePayrollSummaryResponse } from "./use-claim-data";
+import type { EmployeePayrollSummaryResponse } from "./claim-types";
 
 type LiveClaimableSnapshotLike = {
   teeObservedAt: string;

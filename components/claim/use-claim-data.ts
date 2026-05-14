@@ -1,12 +1,9 @@
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { PublicKey } from "@solana/web3.js";
 import { toast } from "sonner";
 import {
   getPrivateBalance,
-  privateTransfer,
-  signAndSend,
   fetchTeeAuthToken,
   isJwtExpired,
   type BalanceResponse,
@@ -16,9 +13,11 @@ import {
   getOrCreateCachedTeeToken,
   loadCachedTeeToken,
 } from "@/lib/client/tee-auth-cache";
-import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
-import type { PayrollPayoutMode } from "@/lib/payroll-payout-mode";
-import type { PayrollMode } from "@/lib/payroll-mode";
+import type {
+  EmployeePayrollSummaryResponse,
+  EmployeePrivateInitStatusResponse,
+  MagicBlockHealthState,
+} from "./claim-types";
 
 const CLAIM_DATA_CACHE_KEY = "expaynse:claim-data-cache";
 
@@ -52,95 +51,6 @@ function saveClaimDataCache(cache: ClaimDataCache) {
     // ignore cache write failures
   }
 }
-
-export interface EmployeePrivateInitStatusResponse {
-  employeeWallet: string;
-  registered: boolean;
-  initialized: boolean;
-  status?: "pending" | "processing" | "confirmed" | "failed";
-  requestedAt?: string | null;
-  lastAttemptAt?: string | null;
-  confirmedAt?: string | null;
-  txSignature?: string | null;
-  error?: string | null;
-  message: string;
-}
-
-export interface EmployeePayrollSummaryResponse {
-  employeeWallet: string;
-  employees: Array<{
-    id: string;
-    employerWallet: string;
-    name: string;
-    payrollMode: PayrollMode;
-    privateRecipientInitializedAt: string | null;
-  }>;
-  streams: Array<{
-    employerWallet: string;
-    employee: {
-      id: string;
-      wallet: string;
-      name: string;
-      privateRecipientInitializedAt: string | null;
-    };
-    stream: {
-      id: string;
-      status: "active" | "paused" | "stopped";
-      ratePerSecond: number;
-      payoutMode: PayrollPayoutMode;
-      allowedPayoutModes: PayrollPayoutMode[];
-      employeePda: string | null;
-      privatePayrollPda: string | null;
-      permissionPda: string | null;
-      delegatedAt: string | null;
-      recipientPrivateInitializedAt: string | null;
-      lastPaidAt: string | null;
-      totalPaid: number;
-      checkpointCrankStatus: "idle" | "pending" | "active" | "failed" | "stopped" | null;
-      checkpointCrankUpdatedAt: string | null;
-      updatedAt: string;
-    };
-    liveState: {
-      ready: boolean;
-      source: "per-snapshot" | "stream-metadata";
-      reason:
-        | "snapshot-available"
-        | "tee-token-missing"
-        | "stream-not-delegated"
-        | "private-account-not-initialized"
-      | "private-state-missing"
-      | "snapshot-unavailable";
-    };
-    snapshot: {
-      employeePda: string;
-      privatePayrollPda: string;
-      employee: string;
-      streamId: string;
-      teeObservedAt: string;
-      status: "active" | "paused" | "stopped";
-      version: string;
-      lastCheckpointTs: string;
-      ratePerSecondMicro: string;
-      lastAccrualTimestamp: string;
-      accruedUnpaidMicro: string;
-      totalPaidPrivateMicro: string;
-      pendingAccrualMicro: string;
-      rawClaimableAmountMicro: string;
-      effectiveClaimableAmountMicro: string;
-      monthlyCapUsd: number | null;
-      monthlyCapMicro: string | null;
-      cycleKey: string | null;
-      cycleStart: string | null;
-      cycleEnd: string | null;
-      paidThisCycleMicro: string | null;
-      remainingCapMicro: string | null;
-      capReached: boolean;
-    } | null;
-  }>;
-  syncedAt: string;
-}
-
-export type MagicBlockHealthState = "checking" | "ok" | "error";
 
 export function useClaimData() {
   const { publicKey, signTransaction, signMessage, connected } = useWallet();
@@ -219,16 +129,26 @@ export function useClaimData() {
   useEffect(() => {
     tokenCache.current = null;
     const cache = loadClaimDataCache();
-    if (publicKey) {
-      const nextWallet = publicKey.toBase58();
-      if (cache?.wallet === nextWallet) {
-        setPrivBalance(cache.privBalance);
-        setPayrollSummary(cache.payrollSummary);
-        setPrivateAccountInitialized(cache.privateAccountInitialized);
-        setRegisteredEmployeeWallet(cache.registeredEmployeeWallet);
-        setPrivateInitStatus(cache.privateInitStatus);
-        setPrivateInitError(cache.privateInitError);
-        setPrivateInitMessage(cache.privateInitMessage);
+    const timeoutId = window.setTimeout(() => {
+      if (publicKey) {
+        const nextWallet = publicKey.toBase58();
+        if (cache?.wallet === nextWallet) {
+          setPrivBalance(cache.privBalance);
+          setPayrollSummary(cache.payrollSummary);
+          setPrivateAccountInitialized(cache.privateAccountInitialized);
+          setRegisteredEmployeeWallet(cache.registeredEmployeeWallet);
+          setPrivateInitStatus(cache.privateInitStatus);
+          setPrivateInitError(cache.privateInitError);
+          setPrivateInitMessage(cache.privateInitMessage);
+        } else {
+          setPrivBalance(null);
+          setPayrollSummary(null);
+          setPrivateAccountInitialized(false);
+          setRegisteredEmployeeWallet(false);
+          setPrivateInitStatus("pending");
+          setPrivateInitError(null);
+          setPrivateInitMessage(null);
+        }
       } else {
         setPrivBalance(null);
         setPayrollSummary(null);
@@ -238,16 +158,10 @@ export function useClaimData() {
         setPrivateInitError(null);
         setPrivateInitMessage(null);
       }
-    } else {
-      setPrivBalance(null);
-      setPayrollSummary(null);
-      setPrivateAccountInitialized(false);
-      setRegisteredEmployeeWallet(false);
-      setPrivateInitStatus("pending");
-      setPrivateInitError(null);
-      setPrivateInitMessage(null);
-    }
-    setPayrollSummaryError(null);
+      setPayrollSummaryError(null);
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
   }, [publicKey]);
 
   useEffect(() => {
@@ -300,8 +214,12 @@ export function useClaimData() {
         setPrivateInitError(json.error ?? null);
         setPrivateInitMessage(json.message ?? null);
         return json.initialized;
-      } catch (err: any) {
-        if (!options?.silent) toast.error(`Private account status failed: ${err.message}`);
+      } catch (err: unknown) {
+        if (!options?.silent) {
+          toast.error(
+            `Private account status failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+          );
+        }
         return false;
       } finally {
         if (!options?.silent) setCheckingPrivateInitStatus(false);
@@ -324,8 +242,12 @@ export function useClaimData() {
         const normalized = parseFloat((parseInt(res.balance ?? "0", 10) / 1_000_000).toFixed(6)).toString();
         setPrivBalance(normalized);
         if (!options?.silent) toast.success(`Current private balance: ${normalized} USDC`);
-      } catch (err: any) {
-        if (!options?.silent) toast.error(`Private balance failed: ${err.message}`);
+      } catch (err: unknown) {
+        if (!options?.silent) {
+          toast.error(
+            `Private balance failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+          );
+        }
       } finally {
         setLoading(false);
       }
@@ -357,16 +279,23 @@ export function useClaimData() {
             headers: token ? { Authorization: `Bearer ${token}` } : undefined,
           },
         );
-        const json = await response.json();
-        if (!response.ok) throw new Error(json.error || "Failed to load summary");
-        setPayrollSummary(json);
+        const json = (await response.json()) as
+          | EmployeePayrollSummaryResponse
+          | { error?: string };
+        if (!response.ok) {
+          throw new Error(
+            "error" in json ? json.error || "Failed to load summary" : "Failed to load summary",
+          );
+        }
+        setPayrollSummary(json as EmployeePayrollSummaryResponse);
         setPayrollSummaryError(null);
-        setMagicBlockHealth(resolveMagicBlockHealth(json));
-      } catch (err: any) {
+        setMagicBlockHealth(resolveMagicBlockHealth(json as EmployeePayrollSummaryResponse));
+      } catch (err: unknown) {
         setMagicBlockHealth("error");
         if (!silent) {
-          setPayrollSummaryError(err.message);
-          toast.error(`Summary failed: ${err.message}`);
+          const message = err instanceof Error ? err.message : "Unknown error";
+          setPayrollSummaryError(message);
+          toast.error(`Summary failed: ${message}`);
         }
       } finally {
         if (!silent) setLoadingPayrollSummary(false);
