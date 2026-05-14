@@ -32,7 +32,19 @@ interface InteractiveGuideProps {
   onClose: () => void;
   onComplete: () => void;
   storageKeyPrefix?: string;
+  storageScopeKey?: string;
   persistCompletion?: boolean;
+}
+
+function buildGuideStorageKey(
+  prefix: string,
+  suffix: "completed" | "step",
+  scopeKey?: string,
+) {
+  if (scopeKey && scopeKey.trim().length > 0) {
+    return `${prefix}-${scopeKey}-${suffix}`;
+  }
+  return `${prefix}-${suffix}`;
 }
 
 export function InteractiveGuide({
@@ -41,10 +53,15 @@ export function InteractiveGuide({
   onClose,
   onComplete,
   storageKeyPrefix = DEFAULT_GUIDE_STORAGE_PREFIX,
+  storageScopeKey,
   persistCompletion = true,
 }: InteractiveGuideProps) {
-  const completionKey = `${storageKeyPrefix}-completed`;
-  const stepKey = `${storageKeyPrefix}-step`;
+  const completionKey = buildGuideStorageKey(
+    storageKeyPrefix,
+    "completed",
+    storageScopeKey,
+  );
+  const stepKey = buildGuideStorageKey(storageKeyPrefix, "step", storageScopeKey);
   const [currentStep, setCurrentStep] = useState(() => {
     if (typeof window === 'undefined') return 0;
     const savedStep = window.localStorage.getItem(stepKey);
@@ -219,7 +236,6 @@ export function InteractiveGuide({
         }}
         onClick={(event) => event.stopPropagation()}
       >
-          {/* Header */}
           <div className="flex items-center justify-between px-5 pt-5 pb-3">
             <div className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-emerald-500" />
@@ -235,7 +251,6 @@ export function InteractiveGuide({
             </button>
           </div>
 
-          {/* Progress bar */}
           <div className="mx-5 h-1 bg-gray-100 rounded-full overflow-hidden">
             <motion.div
               className="h-full bg-emerald-400 rounded-full"
@@ -245,7 +260,6 @@ export function InteractiveGuide({
             />
           </div>
 
-          {/* Content */}
           <div className="px-5 py-4">
             <h3 className="text-lg font-semibold text-gray-900 mb-2">
               {step.title}
@@ -255,7 +269,6 @@ export function InteractiveGuide({
             </p>
           </div>
 
-          {/* Actions */}
           <div className="flex items-center justify-between px-5 pb-5">
             <button
               onClick={handleSkip}
@@ -296,9 +309,16 @@ export function InteractiveGuide({
   );
 }
 
-export function useGuideStatus(storageKeyPrefix = DEFAULT_GUIDE_STORAGE_PREFIX) {
-  const completionKey = `${storageKeyPrefix}-completed`;
-  const stepKey = `${storageKeyPrefix}-step`;
+export function useGuideStatus(
+  storageKeyPrefix = DEFAULT_GUIDE_STORAGE_PREFIX,
+  storageScopeKey?: string,
+) {
+  const completionKey = buildGuideStorageKey(
+    storageKeyPrefix,
+    "completed",
+    storageScopeKey,
+  );
+  const stepKey = buildGuideStorageKey(storageKeyPrefix, "step", storageScopeKey);
   const hasCompleted = useSyncExternalStore(
     (onStoreChange) => {
       if (typeof window === 'undefined') {

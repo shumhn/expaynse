@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -89,8 +89,10 @@ export default function GetStartedPage() {
 
     const walletKey = wallet.publicKey;
     if (!wallet.connected || !walletKey) {
-      setSavedRoleLoaded(true);
-      return;
+      const timeoutId = window.setTimeout(() => {
+        setSavedRoleLoaded(true);
+      }, 0);
+      return () => window.clearTimeout(timeoutId);
     }
 
     const resolveRole = async () => {
@@ -117,14 +119,14 @@ export default function GetStartedPage() {
     };
   }, [wallet.connected, wallet.publicKey]);
 
-  function routeWithRole(role: WalletRole) {
+  const routeWithRole = useCallback((role: WalletRole) => {
     if (!wallet.publicKey) return;
 
     saveWalletRole(wallet.publicKey, role);
     startTransition(() => {
       router.push(getHomePathForRole(role));
     });
-  }
+  }, [router, startTransition, wallet.publicKey]);
 
   function handleRolePick(role: WalletRole) {
     setSelectedRole(role);
@@ -147,9 +149,13 @@ export default function GetStartedPage() {
       return;
     }
 
-    setPendingAutoContinue(false);
-    routeWithRole(selectedRole);
-  }, [pendingAutoContinue, selectedRole, wallet.connected, wallet.publicKey]);
+    const timeoutId = window.setTimeout(() => {
+      setPendingAutoContinue(false);
+      routeWithRole(selectedRole);
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [pendingAutoContinue, selectedRole, wallet.connected, wallet.publicKey, routeWithRole]);
 
   const activeRole = roleOptions.find((item) => item.role === selectedRole) ?? null;
 

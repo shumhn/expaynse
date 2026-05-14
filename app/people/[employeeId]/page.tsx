@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useWallet } from "@solana/wallet-adapter-react";
@@ -170,7 +170,6 @@ export default function EmployeeStatementPage() {
   const [stream, setStream] = useState<StreamInfo | null>(null);
   const [statements, setStatements] = useState<StatementRow[]>([]);
   const [claimSnapshot, setClaimSnapshot] = useState<ClaimSnapshot | null>(null);
-  const [claimableNow, setClaimableNow] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const tokenCache = useRef<string | null>(null);
@@ -233,7 +232,6 @@ export default function EmployeeStatementPage() {
 
         if (!nextEmployee || !nextStream || !publicKey) {
           setClaimSnapshot(null);
-          setClaimableNow(null);
           return;
         }
 
@@ -260,7 +258,6 @@ export default function EmployeeStatementPage() {
 
         if (!summaryRes.ok) {
           setClaimSnapshot(null);
-          setClaimableNow(null);
           return;
         }
 
@@ -282,19 +279,13 @@ export default function EmployeeStatementPage() {
     void load();
   }, [employeeId, publicKey, signMessage, walletAddr]);
 
-  useEffect(() => {
-    if (!claimSnapshot) {
-      setClaimableNow(null);
-      return;
-    }
-
+  const claimableNow = useMemo(() => {
+    if (!claimSnapshot) return null;
     const claimableMicro = computeLiveClaimableAmountMicro({
       snapshot: claimSnapshot,
       nowMs,
     });
-    setClaimableNow(
-      claimableMicro !== null ? Number(claimableMicro) / 1_000_000 : null,
-    );
+    return claimableMicro !== null ? Number(claimableMicro) / 1_000_000 : null;
   }, [claimSnapshot, nowMs]);
 
   const monthlySalary =
