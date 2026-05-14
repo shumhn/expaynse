@@ -430,7 +430,6 @@ function TreasuryPageContent() {
           onClose={() => setAuditorModalOpen(false)}
         />
 
-        {/* TOP METRICS CARDS */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
           <div className="rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 shadow-sm relative overflow-hidden">
             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">Total Payouts</p>
@@ -465,7 +464,6 @@ function TreasuryPageContent() {
           </div>
         </div>
 
-        {/* CHARTS SECTION */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
           <div className="bg-[#0a0a0a] rounded-3xl p-8 shadow-sm border border-white/5">
             <div className="flex items-center justify-between mb-1">
@@ -537,7 +535,6 @@ function TreasuryPageContent() {
           </div>
         </div>
 
-        {/* TRANSACTIONS TABLE */}
         <div className="bg-[#0b0f14] border border-white/10 rounded-3xl overflow-hidden shadow-[0_20px_60px_rgba(0,0,0,0.35)] flex flex-col" style={{ maxHeight: "calc(100vh - 120px)" }}>
           <div className="flex flex-col sm:flex-row sm:items-center justify-between p-6 border-b border-white/10 gap-4 shrink-0">
             <h2 className="text-lg font-bold text-white tracking-tight">All Transactions</h2>

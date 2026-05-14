@@ -22,109 +22,22 @@ import {
 
 import { EmployerLayout } from "@/components/employer-layout";
 import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
-import type { PayrollMode } from "@/lib/payroll-mode";
-
-interface Employee {
-  address: string;
-  amount: number;
-  employeeId?: string;
-  name?: string;
-  department?: string;
-}
-
-type StepStatus = "pending" | "active" | "done" | "error";
-
-interface Step {
-  label: string;
-  status: StepStatus;
-  sig?: string;
-}
-
-interface PayrollSummary {
-  totalAmount: number;
-  employeeCount: number;
-  transferSig?: string;
-}
-
-interface EmployerEmployee {
-  id: string;
-  wallet: string;
-  name: string;
-  payrollMode?: PayrollMode;
-  department?: string;
-  role?: string;
-  compensationAmountUsd?: number;
-  monthlySalaryUsd?: number;
-  paySchedule?: "monthly" | "semi_monthly" | "biweekly" | "weekly";
-  privateRecipientInitStatus?: "pending" | "processing" | "confirmed" | "failed";
-}
-
-interface PayrollHistoryRun {
-  id: string;
-  date: string;
-  mode?: "streaming" | "private_payroll";
-  totalAmount: number;
-  employeeCount: number;
-  employeeIds?: string[];
-  employeeNames?: string[];
-  recipientAddresses: string[];
-  depositSig?: string;
-  transferSig?: string;
-  status: "success" | "failed";
-}
-
-interface CompanySummary {
-  id: string;
-  name: string;
-  treasuryPubkey: string;
-}
-
-function downloadPrivatePayrollRun(run: PayrollHistoryRun) {
-  if (typeof window === "undefined") return;
-
-  const blob = new Blob([JSON.stringify(run, null, 2)], {
-    type: "application/json;charset=utf-8;",
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.setAttribute("href", url);
-  link.setAttribute(
-    "download",
-    `expaynse_private_payroll_run_${run.date.split("T")[0]}.json`,
-  );
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
-}
-
-function getSuggestedPayoutAmount(employee: EmployerEmployee) {
-  if (
-    Number.isFinite(employee.monthlySalaryUsd) &&
-    (employee.monthlySalaryUsd ?? 0) > 0
-  ) {
-    return employee.monthlySalaryUsd ?? 0;
-  }
-
-  if (
-    Number.isFinite(employee.compensationAmountUsd) &&
-    (employee.compensationAmountUsd ?? 0) > 0
-  ) {
-    return employee.compensationAmountUsd ?? 0;
-  }
-
-  return 0;
-}
-
-function employeeToPayoutRow(employee: EmployerEmployee): Employee {
-  return {
-    employeeId: employee.id,
-    name: employee.name,
-    department: employee.department,
-    address: employee.wallet,
-    amount: getSuggestedPayoutAmount(employee),
-  };
-}
+import {
+  downloadPrivatePayrollRun,
+  employeeToPayoutRow,
+  getCurrentBatchSummary,
+  getSuggestedPayoutAmount,
+  isSelectedEmployeeLoaded,
+} from "./manual-helpers";
+import type {
+  CompanySummary,
+  EmployerEmployee,
+  ManualPayrollEmployee as Employee,
+  ManualPayrollStep as Step,
+  ManualPayrollStepStatus as StepStatus,
+  ManualPayrollSummary as PayrollSummary,
+  PayrollHistoryRun,
+} from "./manual-types";
 
 function ManualBatchPayrollContent() {
   const searchParams = useSearchParams();
@@ -146,6 +59,7 @@ function ManualBatchPayrollContent() {
   const reviewSectionRef = useRef<HTMLDivElement>(null);
   const queryEmployeeId = searchParams.get("employee")?.trim() ?? "";
   const initialSelectionAppliedRef = useRef(false);
+  const companyId = company?.id ?? null;
 
   const privatePayrollEmployees = useMemo(
     () => companyEmployees,
@@ -312,42 +226,18 @@ function ManualBatchPayrollContent() {
     privateBalanceUsdc !== null && requiredDepositAmount <= 0.000001;
 
   const currentBatchSummary = useMemo(() => {
-    if (queryEmployeeId && selectedEmployee) {
-      return {
-        label: "Private transfer",
-        detail: selectedEmployee.name,
-      };
-    }
-
-    if (employees.length === 1 && selectedEmployee) {
-      return {
-        label: "Selected employee",
-        detail: selectedEmployee.name,
-      };
-    }
-
-    if (mappedEmployeeCount > 0) {
-      return {
-        label: "Team batch",
-        detail: `${mappedEmployeeCount} employee${mappedEmployeeCount === 1 ? "" : "s"} loaded.`,
-      };
-    }
-
-    return {
-      label: "Custom batch",
-      detail: "Manual or CSV rows.",
-    };
+    return getCurrentBatchSummary({
+      employeesLength: employees.length,
+      mappedEmployeeCount,
+      queryEmployeeId,
+      selectedEmployee,
+    });
   }, [employees.length, mappedEmployeeCount, queryEmployeeId, selectedEmployee]);
 
-  const selectedEmployeeLoaded = useMemo(() => {
-    if (!selectedEmployee || employees.length !== 1) return false;
-
-    const [row] = employees;
-    return (
-      row.employeeId === selectedEmployee.id ||
-      row.address === selectedEmployee.wallet
-    );
-  }, [employees, selectedEmployee]);
+  const selectedEmployeeLoaded = isSelectedEmployeeLoaded({
+    employees,
+    selectedEmployee,
+  });
 
   const directEmployeeFlow = Boolean(queryEmployeeId && selectedEmployee);
 
@@ -420,7 +310,7 @@ function ManualBatchPayrollContent() {
   }, [publicKey, signMessage]);
 
   const refreshPrivateBalance = useCallback(async () => {
-    if (!publicKey || !signMessage || !company?.id) {
+    if (!publicKey || !signMessage || !companyId) {
       setPrivateBalanceUsdc(null);
       return;
     }
@@ -431,7 +321,7 @@ function ManualBatchPayrollContent() {
       const response = await walletAuthenticatedFetch({
         wallet,
         signMessage,
-        path: `/api/company/${company.id}/balance?wallet=${wallet}`,
+        path: `/api/company/${companyId}/balance?wallet=${wallet}`,
         method: "GET",
       });
       const payload = (await response.json()) as {
@@ -448,10 +338,14 @@ function ManualBatchPayrollContent() {
     } finally {
       setPrivateBalanceLoading(false);
     }
-  }, [company?.id, publicKey, signMessage]);
+  }, [companyId, publicKey, signMessage]);
 
   useEffect(() => {
-    void refreshPrivateBalance();
+    const timeoutId = window.setTimeout(() => {
+      void refreshPrivateBalance();
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
   }, [refreshPrivateBalance]);
 
   useEffect(() => {
@@ -466,9 +360,11 @@ function ManualBatchPayrollContent() {
     if (!initialSelectionAppliedRef.current) {
       const fallbackEmployee = privatePayrollEmployees[0];
       const nextId = requestedId || fallbackEmployee.id;
-      setSelectedEmployeeId(nextId);
+      const timeoutId = window.setTimeout(() => {
+        setSelectedEmployeeId(nextId);
+      }, 0);
       initialSelectionAppliedRef.current = true;
-      return;
+      return () => window.clearTimeout(timeoutId);
     }
 
     if (
@@ -478,22 +374,21 @@ function ManualBatchPayrollContent() {
       return;
     }
 
-    setSelectedEmployeeId(requestedId || privatePayrollEmployees[0].id);
+    const timeoutId = window.setTimeout(() => {
+      setSelectedEmployeeId(requestedId || privatePayrollEmployees[0].id);
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
   }, [privatePayrollEmployees, queryEmployeeId, selectedEmployeeId]);
 
   useEffect(() => {
     if (!selectedEmployee) return;
 
-    const suggestedAmount = getSuggestedPayoutAmount(selectedEmployee);
-    setEmployees([
-      {
-        employeeId: selectedEmployee.id,
-        name: selectedEmployee.name,
-        department: selectedEmployee.department,
-        address: selectedEmployee.wallet,
-        amount: suggestedAmount,
-      },
-    ]);
+    const timeoutId = window.setTimeout(() => {
+      setEmployees([employeeToPayoutRow(selectedEmployee)]);
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
   }, [selectedEmployee]);
 
   const runPayroll = useCallback(async () => {
