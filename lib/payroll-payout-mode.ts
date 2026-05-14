@@ -16,7 +16,7 @@ export const PAYROLL_PAYOUT_MODE_OPTIONS: PayrollPayoutModeOption[] = [
   },
 ];
 
-export function allowedPayoutModesFor(mode: PayrollPayoutMode): PayrollPayoutMode[] {
+export function allowedPayoutModesFor(): PayrollPayoutMode[] {
   return ["ephemeral"];
 }
 

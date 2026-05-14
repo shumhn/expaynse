@@ -328,16 +328,15 @@ export async function onboardEmployeeToPayrollProgram(input: {
     payer,
   );
 
-  // --- Auto-Initialize Employee Vault ---
-  // The Backend Payer will send 1 micro USDC to the employee's ephemeral balance.
-  // This forces the MagicBlock API to automatically prepend the base-chain 
-  // `CreateVault` and `DelegateVault` instructions so the employee doesn't have to pay rent.
+  // Auto-initialize the employee ephemeral vault:
+  // send the smallest positive transfer so MagicBlock can prepend vault-create
+  // and vault-delegate instructions automatically during onboarding.
   let employeeVaultInitSignature = null;
   try {
     const initTransferRes = await buildPrivateTransfer({
       from: payer.publicKey.toBase58(),
       to: input.employeeWallet,
-      amountMicro: 1, // Minimum positive amount
+      amountMicro: 1,
       outputMint: DEVNET_USDC,
       balances: { fromBalance: "base", toBalance: "ephemeral" },
     });
@@ -352,13 +351,10 @@ export async function onboardEmployeeToPayrollProgram(input: {
       
       employeeVaultInitSignature = await connection.sendRawTransaction(initTx.serialize(), { skipPreflight: false });
       await connection.confirmTransaction({ signature: employeeVaultInitSignature, ...latest }, "confirmed");
-      console.log(`Auto-initialized Employee Vault. Tx: ${employeeVaultInitSignature}`);
     }
   } catch (err) {
     console.warn("Failed to auto-initialize employee vault during onboarding. Employee may already have a vault or need manual init.", err);
   }
-  // --------------------------------------
-
   return {
     employeePda: employeePda.toBase58(),
     privatePayrollPda: privatePayrollPda.toBase58(),

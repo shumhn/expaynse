@@ -133,3 +133,7 @@ export const getWalletRole = (wallet: string): WalletRole | null => {
 
   return null;
 };
+
+export const getHomePathForRole = (role: WalletRole): string => {
+  return role === "employee" ? "/claim/dashboard" : "/dashboard";
+};

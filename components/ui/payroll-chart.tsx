@@ -113,7 +113,6 @@ export function RunwayProjectionChart({ vaultBalance, monthlyBurnRate }: RunwayC
                 strokeWidth={3}
                 fill={data[data.length - 1].balance === 0 ? "url(#criticalGradient)" : "url(#runwayGradient)"}
               />
-              {/* Optional Refill Warning Line */}
               {monthlyBurnRate > 0 ? (
                 <ReferenceLine y={monthlyBurnRate * 1.5} stroke={EXPAYNSE_RED} strokeDasharray="3 3" opacity={0.5} />
               ) : null}

@@ -136,9 +136,6 @@ export async function sponsorInitializeEmployeeVault(
       signature,
     );
 
-    console.log(
-      `Successfully initialized vault for ${employeeWallet} via ${autoInitSigner.label}`,
-    );
     return true;
   } catch (error) {
     const normalizedMessage = normalizeAutoInitError(

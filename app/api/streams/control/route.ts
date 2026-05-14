@@ -55,7 +55,7 @@ type BuildControlResponse = {
       transactionBase64: string;
       sendTo: "ephemeral";
     };
-    commitEmployee: {
+    commitEmployee?: {
       transactionBase64: string;
       sendTo: "ephemeral";
     };
@@ -287,9 +287,9 @@ export async function POST(request: NextRequest) {
           transactionBase64: Buffer.from(controlSerialized).toString("base64"),
           sendTo: "ephemeral",
         },
-        // We keep commitEmployee as an empty object or remove it to avoid breaking types if they are shared, 
-        // but since we define it here, we'll just remove it from the response.
-      } as any,
+        // `commitEmployee` is intentionally omitted here: control actions only
+        // require the control instruction bundle for this endpoint contract.
+      },
     };
 
     return NextResponse.json(response, { status: 201 });

@@ -132,7 +132,8 @@ async function getConfirmedTeeUnixTimestamp(teeAuthToken: string) {
       return blockTime;
     }
   } catch {
-    // Fall back to local time if confirmed TEE time is unavailable.
+    // If confirmed TEE time is unavailable, fall back to local wall clock
+    // so preview logic still returns a deterministic snapshot.
   }
 
   return Math.floor(Date.now() / 1000);
@@ -143,11 +144,10 @@ function decodePrivatePayrollState(
   employeePda: PublicKey,
   privatePayrollPda: PublicKey,
 ): ExactPrivatePayrollState {
-  // PrivatePayrollState uses AnchorSerialize (not #[account]),
-  // so there is NO 8-byte Anchor discriminator.
-  // The ephemeral account allocates 8 + LEN bytes, but serialize writes from byte 0.
-  //
-  // V2 PrivatePayrollState layout:
+  // Binary layout note:
+  // PrivatePayrollState is `AnchorSerialize` (not `#[account]`), so there is
+  // no 8-byte discriminator prefix. Bytes are written from offset 0.
+  // V2 layout:
   // offset 0:   employee           (32 bytes)
   // offset 32:  employee_wallet    (32 bytes)
   // offset 64:  stream_id          (32 bytes)

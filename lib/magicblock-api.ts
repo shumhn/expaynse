@@ -9,10 +9,10 @@ import {
 import bs58 from "bs58";
 import { getAuthToken } from "@magicblock-labs/ephemeral-rollups-sdk";
 
-// ── JWT expiry helpers ──
-// TEE auth tokens are JWTs. If a cached token is expired or about to expire,
-// the API silently returns the base balance instead of a 401, which causes the
-// "private balance mirrors base" symptom.
+// JWT expiry helpers:
+// TEE auth tokens are JWTs. When an expired token is reused, some endpoints can
+// fall back to base-balance-looking responses instead of returning a hard auth error.
+// We proactively treat near-expiry tokens as stale and refresh before use.
 
 /**
  * Decode a JWT payload without verifying the signature.
@@ -23,7 +23,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
     const payload = parts[1];
-    // base64url → base64 → JSON
+    // Convert base64url payload into JSON.
     const padded = payload.replace(/-/g, "+").replace(/_/g, "/");
     const json = atob(padded);
     return JSON.parse(json) as Record<string, unknown>;
@@ -51,12 +51,12 @@ const SWAP_BASE = "https://payments.magicblock.app/v1/swap";
 const HEALTH_URL = "https://payments.magicblock.app/health";
 export const DEVNET_USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 
-// Standard base RPC for devnet flows
+// Base-layer RPC used for standard Solana transactions.
 const BASE_DEVNET_RPC_URL =
   process.env.NEXT_PUBLIC_SOLANA_RPC_URL || clusterApiUrl("devnet");
 const devnetConnection = new Connection(BASE_DEVNET_RPC_URL, "confirmed");
 
-// MagicBlock ephemeral rollup RPC
+// Ephemeral rollup RPC used for PER/private-balance operations.
 const EPHEMERAL_RPC = "https://devnet.magicblock.app";
 const ephemeralConnection = new Connection(EPHEMERAL_RPC, "confirmed");
 
@@ -181,7 +181,7 @@ export interface BuildSwapResponse {
   [key: string]: unknown;
 }
 
-// ── helpers ──
+// Shared HTTP helpers for the MagicBlock payments/swap APIs.
 
 async function post(
   path: string,
@@ -405,8 +405,8 @@ async function confirmAndAssertSignature(
       await conn.confirmTransaction(signature, "confirmed");
     }
   } catch (confirmError) {
-    // Some RPCs return transient confirm errors even when the signature lands.
-    // Fallback to polling signature status before failing the flow.
+    // Some RPCs return transient confirmation errors even when the signature
+    // has already landed. Poll signature status before marking as failed.
     for (let attempt = 0; attempt < 8; attempt += 1) {
       await sleep(1_000);
       const status = (await conn.getSignatureStatuses([signature])).value[0];
@@ -433,11 +433,10 @@ async function confirmAndAssertSignature(
   await assertSignatureSucceeded(conn, signature);
 }
 
-// ── sign + send utility ──
-//
-// The API returns `sendTo` ("base" | "ephemeral") telling us which RPC to use.
-// For ephemeral txs, always use `signTransaction` and surface the real signing
-// or send error back to the caller.
+// Sign/send utility:
+// The API returns `sendTo` ("base" | "ephemeral"), which selects the RPC path.
+// Ephemeral sends require wallet signing and explicit error surfacing so users
+// can distinguish signature rejection vs network execution failure.
 
 export interface SignAndSendOpts {
   sendTo?: string; // "base" | "ephemeral" from API response
@@ -463,7 +462,8 @@ export async function signAndSend(
     ? opts.sendTo === "ephemeral"
     : Boolean(opts.rpcUrl);
 
-  // ── Ephemeral path ──
+  // Ephemeral path: sign locally, send to the rollup RPC, and retry only
+  // on known transient account-verification failures.
   if (isEphemeral) {
     let signed: Transaction | VersionedTransaction;
     try {
@@ -523,7 +523,8 @@ export async function signAndSend(
     }
   }
 
-  // ── Standard base path ──
+  // Base path: allow preflight, refresh blockhash on retries, and keep
+  // confirmation strict before returning a signature.
   let signed: Transaction | VersionedTransaction;
   try {
     const vtx = VersionedTransaction.deserialize(buf);
@@ -578,7 +579,7 @@ export async function signAndSend(
   throw new Error("Transaction send failed after retry attempts.");
 }
 
-// ── Deserialize helper ──
+// Deserialize helper for versioned or legacy transactions.
 
 export function deserializeTx(
   base64: string
@@ -591,11 +592,11 @@ export function deserializeTx(
   }
 }
 
-// ── Batch sign + send ──
-// Signs all txs in ONE wallet popup via signAllTransactions, then sends in parallel.
-// Returns an array of { index, sig?, error? } for each tx.
+// Batch sign/send helper:
+// Signs each chunk in one wallet prompt via `signAllTransactions`, then sends
+// transactions in parallel and returns per-index success/error results.
 
-const BATCH_SIZE = 20; // max txs per signAllTransactions call
+const BATCH_SIZE = 20; // Maximum txs per signAllTransactions call.
 
 export interface BatchResult {
   index: number;
@@ -614,7 +615,7 @@ export async function batchSignAndSend(
   const conn = getConnection(sendTo);
   const results: BatchResult[] = [];
 
-  // Process in batches of BATCH_SIZE
+  // Process in bounded batches to avoid oversized wallet-sign requests.
   for (
     let batchStart = 0;
     batchStart < txBases64.length;
@@ -623,14 +624,14 @@ export async function batchSignAndSend(
     const batchEnd = Math.min(batchStart + BATCH_SIZE, txBases64.length);
     const batchBase64 = txBases64.slice(batchStart, batchEnd);
 
-    // Deserialize all txs in this batch
+    // Deserialize each transaction before signing.
     const txs = batchBase64.map((b64) => deserializeTx(b64));
 
-    // Sign all at once — ONE wallet popup
+    // Sign this entire batch in one wallet popup.
     onProgress?.("signing", batchStart + 1, txBases64.length);
     const signed = await signAllTransactions(txs);
 
-    // Send all signed txs in parallel
+    // Send signed transactions concurrently to reduce total runtime.
     onProgress?.("sending", batchStart + 1, txBases64.length);
     const sendPromises = signed.map(async (tx, i) => {
       const globalIdx = batchStart + i;
@@ -657,9 +658,9 @@ export async function batchSignAndSend(
   return results;
 }
 
-// ── API functions ──
+// API functions.
 
-// Deposit from Solana into ephemeral rollup vault
+// Deposit from base Solana into the ephemeral vault.
 export async function deposit(owner: string, amount: number, token?: string) {
   const res = await post(
     "/deposit",
@@ -807,8 +808,8 @@ export async function buildSwap(
   return (await postAbsolute(`${SWAP_BASE}/swap`, body, token)) as BuildSwapResponse;
 }
 
-// Private transfer — callers can choose whether funds move from base or ephemeral
-// into a base or ephemeral destination.
+// Private transfer:
+// Callers can control source/destination layers (base vs ephemeral) explicitly.
 export async function buildPrivateTransfer(
   input: PrivateTransferBuildRequest
 ): Promise<PrivateTransferBuildResponse> {
@@ -852,7 +853,7 @@ export async function buildPrivateTransfer(
   }
 
   if (input.clientRefId?.trim()) {
-    // MagicBlock API requires clientRefId to be a non-negative bigint string
+    // MagicBlock requires `clientRefId` to be a non-negative bigint string.
     const raw = input.clientRefId.trim();
     body.clientRefId = /^\d+$/.test(raw) ? raw : "0";
   }
@@ -885,13 +886,13 @@ export async function privateTransfer(
   });
 }
 
-// Balance on base layer (regular Solana ATA)
+// Base-layer balance (regular Solana ATA).
 export async function getBalance(
   address: string,
   token?: string,
   mint = DEVNET_USDC,
 ): Promise<BalanceResponse> {
-  // /balance does not require auth — omit the header entirely when no token
+  // `/balance` does not require auth; omit Authorization when token is missing.
   const headers: Record<string, string> = token
     ? { Authorization: `Bearer ${token}` }
     : {};
@@ -908,7 +909,7 @@ export async function getBalance(
   return data as BalanceResponse;
 }
 
-// Balance on ephemeral rollup — requires a valid TEE auth token
+// Ephemeral rollup balance — requires a valid TEE auth token.
 export async function getPrivateBalance(
   address: string,
   token?: string
@@ -937,7 +938,7 @@ export async function getPrivateBalance(
   return data;
 }
 
-// Withdraw from ephemeral rollup back to Solana
+// Withdraw from ephemeral vault back to base Solana.
 export async function withdraw(owner: string, amount: number, token?: string) {
   const res = await post(
     "/withdraw",
@@ -979,7 +980,7 @@ export async function isMintInitialized(token?: string) {
   };
 }
 
-// Fetch auth token using the wallet signature
+// Fetch a TEE auth token using the wallet signature challenge.
 export async function fetchTeeAuthToken(
   publicKey: PublicKey,
   signMessage: (message: Uint8Array) => Promise<Uint8Array>

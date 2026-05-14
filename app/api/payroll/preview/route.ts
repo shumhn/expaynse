@@ -17,7 +17,6 @@ import {
 } from "@/lib/server/monthly-cap";
 
 const TEE_URL = "https://devnet-tee.magicblock.app";
-const PRIVATE_PAYROLL_STATE_LEN = 300;
 interface PrivatePayrollStatePreview {
   employeePda: string;
   privatePayrollPda: string;
@@ -102,7 +101,7 @@ function decodePrivatePayrollState(
     throw new Error(`Private payroll state account is too small: ${data.length}`);
   }
 
-  // V2 PrivatePayrollState layout (matches Rust struct):
+  // Binary layout note (matches Rust struct fields/order):
   // offset 0:   employee           (32 bytes)
   // offset 32:  employee_wallet    (32 bytes)
   // offset 64:  stream_id          (32 bytes)
@@ -156,7 +155,7 @@ async function getConfirmedTeeUnixTimestamp(teeAuthToken: string) {
       return blockTime;
     }
   } catch {
-    // Fall back to local time if confirmed TEE block time is unavailable.
+    // Fall back to local wall clock if confirmed TEE block time is unavailable.
   }
 
   return Math.floor(Date.now() / 1000);
