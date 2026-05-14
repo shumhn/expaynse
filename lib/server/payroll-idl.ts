@@ -10,8 +10,6 @@ export const PAYROLL_PROGRAM_ID = new PublicKey(
 
 const LOCAL_IDL_PATH = path.join(
   process.cwd(),
-  "contracts",
-  "payroll",
   "target",
   "idl",
   "payroll.json",

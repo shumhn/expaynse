@@ -8,7 +8,7 @@ const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
 
 const PROGRAM_ID = new PublicKey("HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6");
 const ROOT_DIR = path.resolve(__dirname, "..");
-const LOCAL_IDL_PATH = path.join(ROOT_DIR, "contracts", "payroll", "target", "idl", "payroll.json");
+const LOCAL_IDL_PATH = path.join(ROOT_DIR, "target", "idl", "payroll.json");
 const CLUSTER_URL = process.env.PAYROLL_IDL_PARITY_RPC_URL || "https://api.devnet.solana.com";
 
 function stableNormalize(value) {

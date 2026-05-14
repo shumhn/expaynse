@@ -3,7 +3,7 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-WORKSPACE_DIR="$ROOT_DIR/contracts/payroll"
+WORKSPACE_DIR="$ROOT_DIR"
 IDL_PATH="$WORKSPACE_DIR/target/idl/payroll.json"
 PROGRAM_SO_PATH="$WORKSPACE_DIR/target/deploy/payroll.so"
 PROGRAM_KEYPAIR_PATH="$WORKSPACE_DIR/target/deploy/payroll-keypair.json"
@@ -193,7 +193,7 @@ fi
 log "Running existing devnet verifier"
 (
   cd "$WORKSPACE_DIR"
-  node scripts/verify-devnet.js
+  node scripts/payroll/verify-devnet.js
 )
 
 log "Deployment flow completed"
@@ -205,7 +205,7 @@ Recommended next checks:
        ANCHOR_WALLET=$ANCHOR_WALLET
        MONGODB_URI=<your mongodb uri>
   2. From repo root, run:
-       pnpm test:app:self-custody
+       npm run test:app:self-custody
   3. If the app is using the local build artifact, confirm this file is current:
        $IDL_PATH
 EOF

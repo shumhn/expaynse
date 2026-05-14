@@ -33,8 +33,6 @@
   "exclude": [
     "node_modules",
     "tests",
-    "contracts/payroll/tests",
-    "contracts/payroll/scripts",
-    "contracts/payroll/app"
+    "scripts/payroll"
   ],
 }
