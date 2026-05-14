@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
+import { useRouter } from "next/navigation";
 import {
   Wallet,
   RefreshCw,
@@ -14,6 +15,8 @@ import {
   Download,
   Plus,
   Building2,
+  Coins,
+  ExternalLink,
 } from "lucide-react";
 
 import Link from "next/link";
@@ -26,16 +29,52 @@ import { CompensationBreakdownChart } from "@/components/ui/crypto-distribution-
 import { DepositModal } from "@/components/deposit-modal";
 import { SetupCompanyModal } from "@/components/setup-company-modal";
 import {
+  InteractiveGuide,
+  type GuideStep,
+  useGuideStatus,
+} from "@/components/ui/interactive-guide";
+import {
   fetchTeeAuthToken,
   getBalance,
   isJwtExpired,
-  type BalanceResponse,
 } from "@/lib/magicblock-api";
 import {
   clearCachedTeeToken,
   getOrCreateCachedTeeToken,
   loadCachedTeeToken,
 } from "@/lib/client/tee-auth-cache";
+
+const DASHBOARD_BALANCE_CACHE_KEY = "expaynse:employer-dashboard-balance-cache";
+const PEOPLE_ONBOARDING_HANDOFF_KEY = "expaynse:people-onboarding-handoff";
+
+type DashboardBalanceCache = {
+  wallet: string;
+  vaultBalance: number;
+  baseBalance: number;
+};
+
+function loadDashboardBalanceCache(): DashboardBalanceCache | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(DASHBOARD_BALANCE_CACHE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as DashboardBalanceCache;
+  } catch {
+    return null;
+  }
+}
+
+function saveDashboardBalanceCache(cache: DashboardBalanceCache) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      DASHBOARD_BALANCE_CACHE_KEY,
+      JSON.stringify(cache),
+    );
+  } catch {
+    // ignore cache write failures
+  }
+}
 
 type RunStatus =
   | "queued"
@@ -133,9 +172,65 @@ function statusChip(status: RunStatus | CycleStatus) {
   return "bg-red-500/10 text-red-400 border-red-500/20";
 }
 
+const FIRST_TIME_SETUP_STEPS: GuideStep[] = [
+  {
+    id: "setup-company",
+    target: '[data-guide="setup-company"]',
+    title: "Start with company setup",
+    description:
+      "Create your company treasury first. This unlocks payroll funding and the rest of the employer workflow.",
+    position: "bottom",
+  },
+  {
+    id: "deposit-treasury",
+    target: '[data-guide="deposit-treasury"]',
+    title: "Deposit comes next",
+    description:
+      "After setup, fund your treasury here so payroll has balance ready before you add and pay employees.",
+    position: "bottom",
+  },
+  {
+    id: "employee-nav",
+    target: '[data-guide="employee-nav"]',
+    title: "Add employees from here",
+    description:
+      "Open Employees after funding. That is where you add a teammate and choose instant private payroll or real-time streaming.",
+    position: "right",
+  },
+];
+
+const ACTIVE_COMPANY_STEPS: GuideStep[] = [
+  {
+    id: "deposit-treasury",
+    target: '[data-guide="deposit-treasury"]',
+    title: "Fund your payroll treasury",
+    description:
+      "Deposit funds here so your private treasury is ready before disbursing salaries.",
+    position: "bottom",
+  },
+  {
+    id: "employee-nav",
+    target: '[data-guide="employee-nav"]',
+    title: "Add employees from here",
+    description:
+      "Go to Employees next to onboard a teammate. The two payroll modes guide continues there.",
+    position: "right",
+  },
+  {
+    id: "run-payroll",
+    target: '[data-guide="run-payroll"]',
+    title: "Run payroll when ready",
+    description:
+      "Once treasury and employees are ready, continue here to run payroll.",
+    position: "bottom",
+  },
+];
+
 export default function DashboardPage() {
+  const router = useRouter();
   const { connected, publicKey, signMessage } = useWallet();
   const walletAddr = publicKey?.toBase58() ?? "";
+  const initialBalanceCache = loadDashboardBalanceCache();
 
   const [runs, setRuns] = useState<RealPayrollRun[]>([]);
   const [cycles, setCycles] = useState<RealPayrollCycle[]>([]);
@@ -150,16 +245,55 @@ export default function DashboardPage() {
     ratePerSecond: number; totalPaid: number;
   }>>([]);
   const [loading, setLoading] = useState(false);
-  const [vaultBalance, setVaultBalance] = useState<number>(0);
-  const [baseBalance, setBaseBalance] = useState<number>(0);
+  const [vaultBalance, setVaultBalance] = useState<number>(
+    initialBalanceCache?.vaultBalance ?? 0,
+  );
+  const [baseBalance, setBaseBalance] = useState<number>(
+    initialBalanceCache?.baseBalance ?? 0,
+  );
   const [depositOpen, setDepositOpen] = useState(false);
+  const [devnetFundsOpen, setDevnetFundsOpen] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [company, setCompany] = useState<{ id: string; name: string; treasuryPubkey: string } | null>(null);
+  const [isDashboardGuideOpen, setIsDashboardGuideOpen] = useState(false);
+  const [hasShownDashboardGuide, setHasShownDashboardGuide] = useState(false);
+  const { hasCompleted: hasCompletedDashboardGuide } = useGuideStatus("dashboard-onboarding");
 
   const companyRef = useRef(company);
-  companyRef.current = company;
+  const devnetFundsRef = useRef<HTMLDivElement | null>(null);
 
   const tokenCache = useRef<string | null>(null);
+
+  useEffect(() => {
+    companyRef.current = company;
+  }, [company]);
+
+  useEffect(() => {
+    if (!walletAddr) return;
+    saveDashboardBalanceCache({
+      wallet: walletAddr,
+      vaultBalance,
+      baseBalance,
+    });
+  }, [walletAddr, vaultBalance, baseBalance]);
+
+  useEffect(() => {
+    const cache = loadDashboardBalanceCache();
+    if (cache?.wallet === walletAddr) {
+      const frame = window.requestAnimationFrame(() => {
+        setVaultBalance(cache.vaultBalance);
+        setBaseBalance(cache.baseBalance);
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+    if (!walletAddr) {
+      const frame = window.requestAnimationFrame(() => {
+        setVaultBalance(0);
+        setBaseBalance(0);
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [walletAddr]);
 
   const getOrFetchToken = useCallback(async () => {
     if (tokenCache.current && !isJwtExpired(tokenCache.current)) {
@@ -216,7 +350,7 @@ export default function DashboardPage() {
     } catch {
       // Balance fetch failed silently
     }
-  }, [walletAddr, getOrFetchToken]);
+  }, [walletAddr, getOrFetchToken, signMessage]);
 
   const loadDashboard = useCallback(async () => {
     if (!walletAddr || !signMessage) {
@@ -328,6 +462,28 @@ export default function DashboardPage() {
     }
   }, [walletAddr, refreshVaultBalance]);
 
+  useEffect(() => {
+    const shouldBlockFromCompletion = hasCompletedDashboardGuide;
+
+    if (!connected || !walletAddr || loading || shouldBlockFromCompletion || hasShownDashboardGuide) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setIsDashboardGuideOpen(true);
+      setHasShownDashboardGuide(true);
+    }, 220);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    connected,
+    walletAddr,
+    loading,
+    company,
+    hasCompletedDashboardGuide,
+    hasShownDashboardGuide,
+  ]);
+
 
 
   const totalGross = useMemo(
@@ -380,6 +536,41 @@ export default function DashboardPage() {
     [runs],
   );
 
+  const dashboardGuideSteps = company ? ACTIVE_COMPANY_STEPS : FIRST_TIME_SETUP_STEPS;
+
+  useEffect(() => {
+    if (!connected || !walletAddr) {
+      const frame = window.requestAnimationFrame(() => {
+        setIsDashboardGuideOpen(false);
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [connected, walletAddr]);
+
+  useEffect(() => {
+    if (!devnetFundsOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!devnetFundsRef.current?.contains(event.target as Node)) {
+        setDevnetFundsOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setDevnetFundsOpen(false);
+      }
+    };
+
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [devnetFundsOpen]);
+
 
 
   return (
@@ -389,7 +580,9 @@ export default function DashboardPage() {
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-white">{company ? company.name : "Employer Dashboard"}</h1>
             <p className="text-sm text-[#a8a8aa] mt-1">
-              {company ? `Treasury: ${company.treasuryPubkey.slice(0, 4)}...${company.treasuryPubkey.slice(-4)}` : "Real-time on-chain metrics, treasury health, and active stream analytics."}
+              {company
+                ? `Treasury: ${company.treasuryPubkey.slice(0, 4)}...${company.treasuryPubkey.slice(-4)} · Base Solana handles funding and exits, while MagicBlock PER runs live private payroll.`
+                : "Base Solana handles setup and treasury funding, while MagicBlock PER runs live private payroll."}
             </p>
           </div>
           
@@ -402,9 +595,55 @@ export default function DashboardPage() {
             >
               {loading ? <RefreshCw size={18} className="animate-spin text-[#a8a8aa]" /> : <RefreshCw size={18} className="text-[#a8a8aa]" />}
             </button>
-            
+
+            <div ref={devnetFundsRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setDevnetFundsOpen((prev) => !prev)}
+                className="inline-flex h-[44px] items-center gap-2 rounded-2xl border border-white/10 bg-[#0a0a0a] px-5 text-sm font-semibold text-white transition-colors hover:bg-white/5 shadow-sm"
+              >
+                <Coins size={16} className="text-[#a8a8aa]" />
+                Devnet Funds
+              </button>
+
+              {devnetFundsOpen ? (
+                <div className="absolute right-0 top-[calc(100%+0.75rem)] z-30 w-[260px] rounded-[1.5rem] border border-white/10 bg-[#0a0a0a] p-3 shadow-2xl">
+                  <p className="px-2 pb-2 font-lexend text-[10px] font-bold uppercase tracking-[0.18em] text-[#a8a8aa]">
+                    Quick top up
+                  </p>
+
+                  <a
+                    href="https://faucet.solana.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3 transition-colors hover:bg-white/10"
+                  >
+                    <div>
+                      <p className="font-lexend text-sm font-semibold text-white">Get Devnet SOL</p>
+                      <p className="mt-1 text-xs text-[#a8a8aa]">Fund gas and account creation</p>
+                    </div>
+                    <ExternalLink size={14} className="text-[#a8a8aa]" />
+                  </a>
+
+                  <a
+                    href="https://faucet.circle.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-2 flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 px-4 py-3 transition-colors hover:bg-white/10"
+                  >
+                    <div>
+                      <p className="font-lexend text-sm font-semibold text-white">Get Devnet USDC</p>
+                      <p className="mt-1 text-xs text-[#a8a8aa]">Top up payroll test funds</p>
+                    </div>
+                    <ExternalLink size={14} className="text-[#a8a8aa]" />
+                  </a>
+                </div>
+              ) : null}
+            </div>
+
             <button
               onClick={() => setDepositOpen(true)}
+              data-guide="deposit-treasury"
               disabled={!company}
               className="inline-flex h-[44px] items-center gap-2 rounded-2xl border border-white/10 bg-[#0a0a0a] px-5 text-sm font-semibold text-white transition-colors hover:bg-white/5 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
             >
@@ -415,6 +654,7 @@ export default function DashboardPage() {
             {company ? (
               <Link
                 href="/disburse"
+                data-guide="run-payroll"
                 className="inline-flex h-[44px] items-center gap-2 rounded-2xl bg-[#1eba98] px-5 text-sm font-semibold text-black transition-colors hover:bg-[#1eba98]/80 shadow-[0_0_20px_rgba(30,186,152,0.3)]"
               >
                 <Plus size={16} />
@@ -423,6 +663,7 @@ export default function DashboardPage() {
             ) : (
               <button
                 onClick={() => setSetupOpen(true)}
+                data-guide="setup-company"
                 className="inline-flex h-[44px] items-center gap-2 rounded-2xl bg-[#1eba98] px-5 text-sm font-semibold text-black transition-colors hover:bg-[#1eba98]/80 shadow-[0_0_20px_rgba(30,186,152,0.3)]"
               >
                 <Building2 size={16} />
@@ -441,9 +682,9 @@ export default function DashboardPage() {
           <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 shadow-sm">
-                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">Private Vault Balance</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#a8a8aa]">PER Treasury Balance</p>
                 <p className="mt-2 text-2xl font-bold tracking-tight text-white">{formatUsd(vaultBalance)}</p>
-                <p className="mt-1 text-xs text-[#a8a8aa]">Live USDC treasury liquidity</p>
+                <p className="mt-1 text-xs text-[#a8a8aa]">Private USDC treasury liquidity inside MagicBlock PER</p>
               </div>
 
               <div className="rounded-3xl border border-white/10 bg-[#0a0a0a] p-5 shadow-sm">
@@ -596,7 +837,18 @@ export default function DashboardPage() {
         onClose={() => setSetupOpen(false)}
         onSuccess={() => {
           void loadDashboard();
+          if (typeof window !== "undefined") {
+            window.sessionStorage.setItem(PEOPLE_ONBOARDING_HANDOFF_KEY, "1");
+          }
+          router.push("/people");
         }}
+      />
+      <InteractiveGuide
+        steps={dashboardGuideSteps}
+        isOpen={connected && isDashboardGuideOpen}
+        onClose={() => setIsDashboardGuideOpen(false)}
+        onComplete={() => setIsDashboardGuideOpen(false)}
+        storageKeyPrefix="dashboard-onboarding"
       />
     </EmployerLayout>
   );

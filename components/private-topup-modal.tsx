@@ -1,53 +1,97 @@
-import { useState, useEffect } from "react";
-import { Loader2, X, Wallet, CheckCircle2, ExternalLink, ShieldCheck } from "lucide-react";
-import { useWallet } from "@solana/wallet-adapter-react";
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Connection, clusterApiUrl } from "@solana/web3.js";
+import { useWallet } from "@solana/wallet-adapter-react";
 import {
-  deposit,
-  buildPrivateTransfer,
-  signAndSend,
-  checkHealth,
+  CheckCircle2,
+  ExternalLink,
+  Loader2,
+  ShieldCheck,
+  Wallet,
+  X,
+} from "lucide-react";
+import { toast } from "sonner";
+import {
   DEVNET_USDC,
+  buildSwap,
+  checkHealth,
+  deposit,
   getBalance,
   getSwapQuote,
-  buildSwap,
+  signAndSend,
 } from "@/lib/magicblock-api";
-import {
-  buildTreasuryPrivateSwapRequest,
-  buildTreasurySwapQuoteParams,
-  getTreasuryFundingHistoryType,
-  getTreasuryFundingSuccessMessage,
-  getTreasuryFundingModeMeta,
-  hasDevnetUsdt,
-  validateTreasuryFundingInput,
-  type TreasuryFundingMode,
-} from "@/lib/private-swap";
-import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
-import { toast } from "sonner";
-import Link from "next/link";
 
 const DEVNET_CONNECTION = new Connection(clusterApiUrl("devnet"), "confirmed");
+const SOL_MINT = "So11111111111111111111111111111111111111112";
 const DEVNET_USDT_MINT =
   process.env.NEXT_PUBLIC_DEVNET_USDT_MINT?.trim() || "";
-const HAS_DEVNET_USDT = hasDevnetUsdt(DEVNET_USDT_MINT);
-const FUNDING_MODE_META = getTreasuryFundingModeMeta(DEVNET_USDT_MINT);
+const HAS_DEVNET_USDT = DEVNET_USDT_MINT.length > 0;
 
-export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance = 0, onDepositSuccess, treasuryPubkey }: { isOpen: boolean; onClose: () => void; baseBalance?: number; privateBalance?: number; onDepositSuccess?: () => void; treasuryPubkey?: string }) {
+type FundingMode = "deposit" | "swap-sol" | "swap-usdt";
+
+const FUNDING_MODE_META: Record<
+  FundingMode,
+  {
+    label: string;
+    inputLabel: string;
+    inputSymbol: string;
+    buttonLabel: string;
+    balanceLabel: string;
+    inputMint?: string;
+  }
+> = {
+  deposit: {
+    label: "Deposit USDC",
+    inputLabel: "Amount (USDC)",
+    inputSymbol: "USDC",
+    buttonLabel: "Top Up Private Balance",
+    balanceLabel: "Your Wallet Balance",
+  },
+  "swap-sol": {
+    label: "Swap SOL",
+    inputLabel: "Amount (SOL)",
+    inputSymbol: "SOL",
+    buttonLabel: "Swap to Private Balance",
+    balanceLabel: "Your SOL Balance",
+    inputMint: SOL_MINT,
+  },
+  "swap-usdt": {
+    label: "Swap USDT",
+    inputLabel: "Amount (USDT)",
+    inputSymbol: "USDT",
+    buttonLabel: "Swap to Private Balance",
+    balanceLabel: "Your USDT Balance",
+    inputMint: DEVNET_USDT_MINT,
+  },
+};
+
+export function PrivateTopUpModal({
+  isOpen,
+  onClose,
+  privateBalance = 0,
+  onTopUpSuccess,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  privateBalance?: number;
+  onTopUpSuccess?: () => void;
+}) {
   const { publicKey, signTransaction, signMessage } = useWallet();
   const [amount, setAmount] = useState("");
-  const [fundingMode, setFundingMode] = useState<TreasuryFundingMode>("deposit");
+  const [fundingMode, setFundingMode] = useState<FundingMode>("deposit");
   const [loading, setLoading] = useState(false);
   const [successSig, setSuccessSig] = useState<string | null>(null);
   const [depositedAmount, setDepositedAmount] = useState<number | null>(null);
   const [magicBlockHealth, setMagicBlockHealth] = useState<"checking" | "ok" | "error">("checking");
-  const [liveBaseBalance, setLiveBaseBalance] = useState(baseBalance);
+  const [liveBaseBalance, setLiveBaseBalance] = useState(0);
   const [liveSolBalance, setLiveSolBalance] = useState(0);
   const [liveUsdtBalance, setLiveUsdtBalance] = useState(0);
   const [swapQuoteOutUsdc, setSwapQuoteOutUsdc] = useState<number | null>(null);
   const [swapQuoteLoading, setSwapQuoteLoading] = useState(false);
   const [swapQuoteError, setSwapQuoteError] = useState<string | null>(null);
 
-  // Reset state when modal opens/closes
   useEffect(() => {
     if (!isOpen) return;
 
@@ -62,46 +106,32 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
     });
 
     checkHealth()
-      .then(res => setMagicBlockHealth(res.status === "ok" ? "ok" : "error"))
+      .then((res) => setMagicBlockHealth(res.status === "ok" ? "ok" : "error"))
       .catch(() => setMagicBlockHealth("error"));
 
     if (publicKey) {
       void getBalance(publicKey.toBase58())
         .then((res) => {
           const next = parseInt(res.balance ?? "0", 10) / 1_000_000;
-          if (Number.isFinite(next)) {
-            setLiveBaseBalance(next);
-          }
+          if (Number.isFinite(next)) setLiveBaseBalance(next);
         })
-        .catch(() => {
-          // fall back to parent-provided balance
-        });
+        .catch(() => setLiveBaseBalance(0));
 
       void DEVNET_CONNECTION.getBalance(publicKey)
-        .then((lamports) => {
-          setLiveSolBalance(lamports / 1_000_000_000);
-        })
-        .catch(() => {
-          setLiveSolBalance(0);
-        });
+        .then((lamports) => setLiveSolBalance(lamports / 1_000_000_000))
+        .catch(() => setLiveSolBalance(0));
 
       if (HAS_DEVNET_USDT) {
         void getBalance(publicKey.toBase58(), undefined, DEVNET_USDT_MINT)
           .then((res) => {
             const next = parseInt(res.balance ?? "0", 10) / 1_000_000;
-            if (Number.isFinite(next)) {
-              setLiveUsdtBalance(next);
-            }
+            if (Number.isFinite(next)) setLiveUsdtBalance(next);
           })
-          .catch(() => {
-            setLiveUsdtBalance(0);
-          });
+          .catch(() => setLiveUsdtBalance(0));
       }
     }
 
-    return () => {
-      cancelAnimationFrame(frameId);
-    };
+    return () => cancelAnimationFrame(frameId);
   }, [isOpen, publicKey]);
 
   useEffect(() => {
@@ -114,49 +144,48 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
         setSwapQuoteError(null);
         setSwapQuoteLoading(false);
       });
-      return () => {
-        cancelAnimationFrame(frameId);
-      };
+      return () => cancelAnimationFrame(frameId);
     }
 
     const amountLamports = Math.round(parsed * 1_000_000_000);
-    if (amountLamports <= 0) {
+    if (fundingMode === "swap-sol" && amountLamports <= 0) {
       const frameId = requestAnimationFrame(() => {
         setSwapQuoteOutUsdc(null);
         setSwapQuoteError("Enter a larger SOL amount.");
         setSwapQuoteLoading(false);
       });
-      return () => {
-        cancelAnimationFrame(frameId);
-      };
+      return () => cancelAnimationFrame(frameId);
     }
 
     let cancelled = false;
     const timer = setTimeout(() => {
       setSwapQuoteLoading(true);
       setSwapQuoteError(null);
-      void getSwapQuote(
-        buildTreasurySwapQuoteParams({
-          mode: fundingMode,
-          amountUi: parsed,
-          devnetUsdtMint: DEVNET_USDT_MINT,
-          outputMint: DEVNET_USDC,
-        }),
-      )
+      void getSwapQuote({
+        inputMint: FUNDING_MODE_META[fundingMode].inputMint || SOL_MINT,
+        outputMint: DEVNET_USDC,
+        amount:
+          fundingMode === "swap-sol"
+            ? String(amountLamports)
+            : String(Math.round(parsed * 1_000_000)),
+        swapMode: "ExactIn",
+        slippageBps: 50,
+        restrictIntermediateTokens: true,
+        asLegacyTransaction: false,
+      })
         .then((quote) => {
           if (cancelled) return;
           setSwapQuoteOutUsdc(parseInt(quote.outAmount, 10) / 1_000_000);
         })
         .catch((err) => {
           if (cancelled) return;
-          const message = err instanceof Error ? err.message : "Failed to fetch swap quote.";
+          const message =
+            err instanceof Error ? err.message : "Failed to fetch swap quote.";
           setSwapQuoteOutUsdc(null);
           setSwapQuoteError(message);
         })
         .finally(() => {
-          if (!cancelled) {
-            setSwapQuoteLoading(false);
-          }
+          if (!cancelled) setSwapQuoteLoading(false);
         });
     }, 250);
 
@@ -175,43 +204,49 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
     onClose();
   };
 
-  const handleDeposit = async () => {
+  const handleTopUp = async () => {
     if (!publicKey || !signTransaction) {
       toast.error("Wallet not connected");
       return;
     }
+
     const val = parseFloat(amount);
-    if (isNaN(val) || val <= 0) {
+    if (!Number.isFinite(val) || val <= 0) {
       toast.error("Enter a valid amount");
       return;
     }
+
     let latestBaseBalance = liveBaseBalance;
     let latestSolBalance = liveSolBalance;
     let latestUsdtBalance = liveUsdtBalance;
+
     try {
       const balanceRes = await getBalance(publicKey.toBase58());
       latestBaseBalance = parseInt(balanceRes.balance ?? "0", 10) / 1_000_000;
-      if (Number.isFinite(latestBaseBalance)) {
-        setLiveBaseBalance(latestBaseBalance);
-      }
+      if (Number.isFinite(latestBaseBalance)) setLiveBaseBalance(latestBaseBalance);
     } catch {
       // keep last known balance
     }
+
     try {
-      latestSolBalance = (await DEVNET_CONNECTION.getBalance(publicKey)) / 1_000_000_000;
+      latestSolBalance =
+        (await DEVNET_CONNECTION.getBalance(publicKey)) / 1_000_000_000;
       setLiveSolBalance(latestSolBalance);
     } catch {
-      // keep last known SOL balance
+      // keep last known balance
     }
+
     if (HAS_DEVNET_USDT) {
       try {
-        const usdtRes = await getBalance(publicKey.toBase58(), undefined, DEVNET_USDT_MINT);
+        const usdtRes = await getBalance(
+          publicKey.toBase58(),
+          undefined,
+          DEVNET_USDT_MINT,
+        );
         latestUsdtBalance = parseInt(usdtRes.balance ?? "0", 10) / 1_000_000;
-        if (Number.isFinite(latestUsdtBalance)) {
-          setLiveUsdtBalance(latestUsdtBalance);
-        }
+        if (Number.isFinite(latestUsdtBalance)) setLiveUsdtBalance(latestUsdtBalance);
       } catch {
-        // keep last known USDT balance
+        // keep last known balance
       }
     }
 
@@ -221,72 +256,61 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
       let transactionBase64: string | undefined;
       let sendTo: string | undefined;
 
-      if (fundingMode !== "deposit") {
-        const validation = validateTreasuryFundingInput({
-          mode: fundingMode,
-          amountUi: val,
-          treasuryPubkey,
-          baseUsdc: latestBaseBalance,
-          sol: latestSolBalance,
-          usdt: latestUsdtBalance,
-        });
-        if (!validation.ok) {
-          toast.error(validation.error);
+      if (fundingMode === "deposit") {
+        if (val > latestBaseBalance) {
+          toast.error("Insufficient base balance");
+          return;
+        }
+        if (latestBaseBalance <= 0) {
+          toast.error("Current wallet has no live base USDC. Fund this wallet with devnet USDC first.");
           return;
         }
 
-        const quote = await getSwapQuote(
-          buildTreasurySwapQuoteParams({
-            mode: fundingMode,
-            amountUi: val,
-            devnetUsdtMint: DEVNET_USDT_MINT,
-            outputMint: DEVNET_USDC,
-          }),
-        );
+        const depositRes = await deposit(owner, val);
+        transactionBase64 = depositRes.transactionBase64;
+        sendTo = depositRes.sendTo;
+      } else {
+        const isSolSwap = fundingMode === "swap-sol";
+        const liveInputBalance = isSolSwap ? latestSolBalance : latestUsdtBalance;
+        const assetLabel = isSolSwap ? "devnet SOL" : "devnet USDT";
 
-        const swapRes = await buildSwap(
-          buildTreasuryPrivateSwapRequest({
-            mode: fundingMode,
-            userPublicKey: owner,
-            treasuryPubkey: treasuryPubkey!,
-            quoteResponse: quote,
-          }),
-        );
+        if (val > liveInputBalance) {
+          toast.error(`Insufficient ${assetLabel} balance.`);
+          return;
+        }
+        if (liveInputBalance <= 0) {
+          toast.error(`Current wallet has no ${assetLabel}. Fund this wallet first.`);
+          return;
+        }
+
+        const quote = await getSwapQuote({
+          inputMint: FUNDING_MODE_META[fundingMode].inputMint || SOL_MINT,
+          outputMint: DEVNET_USDC,
+          amount: String(Math.round(val * (isSolSwap ? 1_000_000_000 : 1_000_000))),
+          swapMode: "ExactIn",
+          slippageBps: 50,
+          restrictIntermediateTokens: true,
+          asLegacyTransaction: false,
+        });
+
+        const swapRes = await buildSwap({
+          userPublicKey: owner,
+          payer: owner,
+          quoteResponse: quote,
+          wrapAndUnwrapSol: isSolSwap,
+          useSharedAccounts: true,
+          dynamicComputeUnitLimit: true,
+          visibility: "private",
+          privateOptions: {
+            destination: owner,
+            minDelayMs: "0",
+            maxDelayMs: "60000",
+            split: 3,
+          },
+        });
 
         transactionBase64 = swapRes.swapTransaction;
         sendTo = "base";
-      } else {
-        const validation = validateTreasuryFundingInput({
-          mode: "deposit",
-          amountUi: val,
-          treasuryPubkey,
-          baseUsdc: latestBaseBalance,
-          sol: latestSolBalance,
-          usdt: latestUsdtBalance,
-        });
-        if (!validation.ok) {
-          toast.error(validation.error);
-          return;
-        }
-
-        if (treasuryPubkey) {
-          const buildRes = await buildPrivateTransfer({
-            from: owner,
-            to: treasuryPubkey,
-            amount: val,
-            outputMint: DEVNET_USDC,
-            balances: {
-              fromBalance: "base",
-              toBalance: "ephemeral"
-            }
-          });
-          transactionBase64 = buildRes.transactionBase64;
-          sendTo = buildRes.sendTo;
-        } else {
-          const depositRes = await deposit(owner, val);
-          transactionBase64 = depositRes.transactionBase64;
-          sendTo = depositRes.sendTo;
-        }
       }
 
       if (transactionBase64 && sendTo) {
@@ -296,36 +320,20 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
           publicKey: publicKey || undefined,
         });
 
-        // Save deposit to history
-        if (signMessage) {
-          try {
-            await walletAuthenticatedFetch({
-              path: "/api/history",
-              method: "POST",
-              signMessage,
-              wallet: owner,
-              body: {
-                kind: "setup-action",
-                wallet: owner,
-                type: getTreasuryFundingHistoryType(fundingMode),
-                amount: val,
-                txSig: sig,
-                status: "success",
-              },
-            });
-          } catch (historyErr) {
-            console.error("Failed to save deposit to history", historyErr);
-          }
-        }
-
-        toast.success(getTreasuryFundingSuccessMessage(fundingMode, val));
+        toast.success(
+          fundingMode === "swap-sol"
+            ? `Successfully swapped ${val} SOL into your private USDC balance`
+            : fundingMode === "swap-usdt"
+              ? `Successfully swapped ${val} USDT into your private USDC balance`
+              : `Successfully topped up ${val} USDC`
+        );
         setDepositedAmount(val);
         setSuccessSig(sig);
-        onDepositSuccess?.();
+        onTopUpSuccess?.();
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      toast.error(`Deposit failed: ${message}`);
+      toast.error(`Top up failed: ${message}`);
     } finally {
       setLoading(false);
     }
@@ -351,39 +359,35 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
               <CheckCircle2 size={28} className="text-emerald-400" />
             </div>
 
-            <h2 className="mb-1 text-2xl font-bold tracking-tight text-white">Deposit Complete</h2>
+            <h2 className="mb-1 text-2xl font-bold tracking-tight text-white">Private Top Up Complete</h2>
             <p className="mb-8 text-sm text-[#a8a8aa]">
-              Your funds have been successfully deposited to the ephemeral vault.
+              Your funds have been routed into your private PER balance.
             </p>
 
             <div className="mb-8 rounded-2xl border border-white/5 bg-white/5 p-4">
               <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa]">
-                Amount Deposited
+                Amount Added
               </p>
               <p className="text-xl font-bold text-white">
                 {depositedAmount?.toFixed(2)}{" "}
-                <span className="text-sm text-emerald-400">
-                  USDC
-                </span>
+                <span className="text-sm text-emerald-400">USDC</span>
               </p>
             </div>
 
-            <div className="mb-8 space-y-2">
-              <a
-                href={`https://solscan.io/tx/${successSig}?cluster=devnet`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="group flex w-full items-center justify-between rounded-xl border border-white/5 bg-[#111111] px-4 py-3 transition-all hover:border-white/10 hover:bg-white/5"
-              >
-                <span className="font-mono text-xs text-[#a8a8aa] transition-colors group-hover:text-white">
-                  View on Solscan
-                </span>
-                <div className="flex items-center gap-1.5 font-mono text-xs text-[#1eba98]">
-                  {successSig.slice(0, 8)}...
-                  <ExternalLink size={11} />
-                </div>
-              </a>
-            </div>
+            <a
+              href={`https://solscan.io/tx/${successSig}?cluster=devnet`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group mb-8 flex w-full items-center justify-between rounded-xl border border-white/5 bg-[#111111] px-4 py-3 transition-all hover:border-white/10 hover:bg-white/5"
+            >
+              <span className="font-mono text-xs text-[#a8a8aa] transition-colors group-hover:text-white">
+                View on Solscan
+              </span>
+              <div className="flex items-center gap-1.5 font-mono text-xs text-[#1eba98]">
+                {successSig.slice(0, 8)}...
+                <ExternalLink size={11} />
+              </div>
+            </a>
 
             <div className="grid grid-cols-2 gap-3">
               <button
@@ -393,21 +397,21 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
                 Close
               </button>
               <Link
-                href="/people"
+                href="/claim/withdraw"
                 onClick={handleClose}
                 className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-white py-4 text-sm font-bold text-black transition-all hover:bg-white/90"
               >
-                Go to People
+                Open Withdraw
               </Link>
             </div>
           </>
         ) : (
           <>
-            <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/5 mx-auto">
+            <div className="mb-6 mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/5">
               <Wallet size={28} className="text-white" />
             </div>
 
-            <div className="flex justify-center mb-6">
+            <div className="mb-6 flex justify-center">
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-[#111111] px-3 py-1.5 shadow-sm">
                 <ShieldCheck
                   size={14}
@@ -420,32 +424,33 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
                   }
                 />
                 <span
-                  className={`text-[10px] font-bold uppercase tracking-widest ${magicBlockHealth === "ok"
-                    ? "text-[#1eba98]"
-                    : magicBlockHealth === "error"
-                      ? "text-amber-400"
-                      : "text-[#a8a8aa]"
-                    }`}
+                  className={`text-[10px] font-bold uppercase tracking-widest ${
+                    magicBlockHealth === "ok"
+                      ? "text-[#1eba98]"
+                      : magicBlockHealth === "error"
+                        ? "text-amber-400"
+                        : "text-[#a8a8aa]"
+                  }`}
                 >
                   {magicBlockHealth === "ok"
-                    ? "Vault Secured"
+                    ? "Private Rail Ready"
                     : magicBlockHealth === "error"
                       ? "Network Degraded"
-                      : "Verifying Vault"}
+                      : "Checking Route"}
                 </span>
               </div>
             </div>
 
             <div className="text-center">
-              <h2 className="mb-1 text-2xl font-bold tracking-tight text-white">Deposit to Treasury</h2>
+              <h2 className="mb-1 text-2xl font-bold tracking-tight text-white">Top Up Private Balance</h2>
               <p className="mb-8 text-sm text-[#a8a8aa]">
-                Add USDC to the company treasury to fund payroll streams and manual disbursements.
+                Move USDC directly into PER, or privately swap SOL or USDT into your private USDC balance.
               </p>
             </div>
 
             <div className="mb-6 grid grid-cols-2 gap-4">
               <div className="rounded-2xl border border-white/5 bg-white/5 p-4">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa] mb-1">
+                <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa]">
                   {FUNDING_MODE_META[fundingMode].balanceLabel}
                 </p>
                 <p className="text-xl font-bold text-white">
@@ -463,63 +468,69 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
                 </p>
               </div>
               <div className="rounded-2xl border border-white/5 bg-white/5 p-4">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa] mb-1">Treasury Balance</p>
-                <p className="text-xl font-bold text-white">{privateBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-xs text-[#a8a8aa]">USDC</span></p>
+                <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa]">
+                  Private Balance
+                </p>
+                <p className="text-xl font-bold text-white">
+                  {privateBalance.toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}{" "}
+                  <span className="text-xs text-[#a8a8aa]">USDC</span>
+                </p>
               </div>
             </div>
 
-            {treasuryPubkey ? (
-              <div
-                className={`mb-6 grid gap-2 rounded-2xl border border-white/10 bg-[#111111] p-1 ${
-                  HAS_DEVNET_USDT ? "grid-cols-3" : "grid-cols-2"
+            <div
+              className={`mb-6 grid gap-2 rounded-2xl border border-white/10 bg-[#111111] p-1 ${
+                HAS_DEVNET_USDT ? "grid-cols-3" : "grid-cols-2"
+              }`}
+            >
+              <button
+                onClick={() => {
+                  setFundingMode("deposit");
+                  setSwapQuoteError(null);
+                }}
+                className={`rounded-xl px-4 py-3 text-xs font-bold uppercase tracking-widest transition-all ${
+                  fundingMode === "deposit"
+                    ? "bg-white text-black"
+                    : "text-[#a8a8aa] hover:text-white"
                 }`}
               >
+                Deposit USDC
+              </button>
+              <button
+                onClick={() => {
+                  setFundingMode("swap-sol");
+                  setSwapQuoteError(null);
+                }}
+                className={`rounded-xl px-4 py-3 text-xs font-bold uppercase tracking-widest transition-all ${
+                  fundingMode === "swap-sol"
+                    ? "bg-white text-black"
+                    : "text-[#a8a8aa] hover:text-white"
+                }`}
+              >
+                Swap SOL
+              </button>
+              {HAS_DEVNET_USDT ? (
                 <button
                   onClick={() => {
-                    setFundingMode("deposit");
+                    setFundingMode("swap-usdt");
                     setSwapQuoteError(null);
                   }}
                   className={`rounded-xl px-4 py-3 text-xs font-bold uppercase tracking-widest transition-all ${
-                    fundingMode === "deposit"
+                    fundingMode === "swap-usdt"
                       ? "bg-white text-black"
                       : "text-[#a8a8aa] hover:text-white"
                   }`}
                 >
-                  Deposit USDC
+                  Swap USDT
                 </button>
-                <button
-                  onClick={() => {
-                    setFundingMode("swap-sol");
-                    setSwapQuoteError(null);
-                  }}
-                  className={`rounded-xl px-4 py-3 text-xs font-bold uppercase tracking-widest transition-all ${
-                    fundingMode === "swap-sol"
-                      ? "bg-white text-black"
-                      : "text-[#a8a8aa] hover:text-white"
-                  }`}
-                >
-                  Swap SOL
-                </button>
-                {HAS_DEVNET_USDT ? (
-                  <button
-                    onClick={() => {
-                      setFundingMode("swap-usdt");
-                      setSwapQuoteError(null);
-                    }}
-                    className={`rounded-xl px-4 py-3 text-xs font-bold uppercase tracking-widest transition-all ${
-                      fundingMode === "swap-usdt"
-                        ? "bg-white text-black"
-                        : "text-[#a8a8aa] hover:text-white"
-                    }`}
-                  >
-                    Swap USDT
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
+              ) : null}
+            </div>
 
             <div className="mb-6 relative">
-              <div className="flex items-center justify-between mb-2">
+              <div className="mb-2 flex items-center justify-between">
                 <label className="block text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa]">
                   {FUNDING_MODE_META[fundingMode].inputLabel}
                 </label>
@@ -530,10 +541,10 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
                         ? liveSolBalance.toString()
                         : fundingMode === "swap-usdt"
                           ? liveUsdtBalance.toString()
-                        : liveBaseBalance.toString()
+                          : liveBaseBalance.toString(),
                     )
                   }
-                  className="text-[10px] font-bold uppercase tracking-widest text-[#1eba98] hover:text-[#1eba98]/80 transition-colors"
+                  className="text-[10px] font-bold uppercase tracking-widest text-[#1eba98] transition-colors hover:text-[#1eba98]/80"
                 >
                   Max
                 </button>
@@ -561,7 +572,7 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa]">
-                      Private Treasury Output
+                      Private Balance Output
                     </p>
                     <p className="text-lg font-bold text-white">
                       {swapQuoteLoading
@@ -572,7 +583,7 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
                     </p>
                   </div>
                   <div className="text-right text-xs text-[#a8a8aa]">
-                    <p>Output lands privately in treasury.</p>
+                    <p>Output lands privately in PER.</p>
                     <p className="mt-1 text-[#1eba98]">
                       {FUNDING_MODE_META[fundingMode].inputSymbol} to private USDC
                     </p>
@@ -585,14 +596,16 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
             ) : null}
 
             <button
-              onClick={handleDeposit}
+              onClick={handleTopUp}
               disabled={
                 loading ||
                 !amount ||
                 parseFloat(amount) <= 0 ||
                 (fundingMode !== "deposit"
                   ? parseFloat(amount) >
-                      (fundingMode === "swap-sol" ? liveSolBalance : liveUsdtBalance) ||
+                      (fundingMode === "swap-sol"
+                        ? liveSolBalance
+                        : liveUsdtBalance) ||
                     swapQuoteLoading ||
                     !!swapQuoteError
                   : parseFloat(amount) > liveBaseBalance)
@@ -601,21 +614,11 @@ export function DepositModal({ isOpen, onClose, baseBalance = 0, privateBalance 
             >
               {loading ? <Loader2 size={18} className="animate-spin" /> : null}
               {loading
-                ? fundingMode !== "deposit"
-                  ? "Processing Swap..."
-                  : "Processing Deposit..."
+                ? fundingMode === "deposit"
+                  ? "Processing Top Up..."
+                  : "Processing Swap..."
                 : FUNDING_MODE_META[fundingMode].buttonLabel}
             </button>
-            {fundingMode === "swap-sol" ? (
-              <p className="mt-3 text-center text-xs text-[#a8a8aa]">
-                Swap uses your connected wallet as input and delivers the USDC output privately into the treasury.
-              </p>
-            ) : null}
-            {fundingMode === "swap-usdt" && !HAS_DEVNET_USDT ? (
-              <p className="mt-3 text-center text-xs text-amber-300">
-                Configure <code>NEXT_PUBLIC_DEVNET_USDT_MINT</code> to enable real devnet USDT treasury swaps.
-              </p>
-            ) : null}
           </>
         )}
       </div>

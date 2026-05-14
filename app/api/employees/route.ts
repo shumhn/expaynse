@@ -10,6 +10,7 @@ import {
   verifyAuthorizedWalletRequest,
 } from "@/lib/wallet-request-auth";
 import { sponsorInitializeEmployeeVault } from "@/lib/server/sponsor";
+import { normalizePayrollMode, type PayrollMode } from "@/lib/payroll-mode";
 
 function getEmployerWalletFromRequest(request: NextRequest) {
   const wallet = request.nextUrl.searchParams.get("employerWallet")?.trim();
@@ -59,6 +60,7 @@ export async function POST(request: NextRequest) {
       employerWallet?: string;
       wallet?: string;
       name?: string;
+      payrollMode?: PayrollMode;
       notes?: string;
       department?: string;
       role?: string;
@@ -82,6 +84,7 @@ export async function POST(request: NextRequest) {
       employerWallet: body.employerWallet ?? "",
       wallet: body.wallet ?? "",
       name: body.name ?? "",
+      payrollMode: normalizePayrollMode(body.payrollMode),
       notes: body.notes,
       department: body.department,
       role: body.role,
@@ -94,7 +97,10 @@ export async function POST(request: NextRequest) {
       startDate: body.startDate,
     });
     try {
-      await sponsorInitializeEmployeeVault(employee.wallet);
+      await sponsorInitializeEmployeeVault(
+        employee.wallet,
+        body.employerWallet ?? "",
+      );
     } catch (sponsorError) {
       console.error(
         `Sponsor initialization crashed for ${employee.wallet}:`,

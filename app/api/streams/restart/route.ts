@@ -26,14 +26,20 @@ import {
 const PROGRAM_ID = new PublicKey(
   "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6",
 );
-const DEVNET_RPC = clusterApiUrl("devnet");
+const BASE_DEVNET_RPC_URL =
+  process.env.BASE_RPC_URL ||
+  process.env.HELIUS_RPC_URL ||
+  process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
+  process.env.NEXT_PUBLIC_SOLANA_RPC_URL ||
+  clusterApiUrl("devnet");
 const TEE_URL = "https://devnet-tee.magicblock.app";
-const PRIVATE_PAYROLL_STATE_LEN = 114;
+const PRIVATE_PAYROLL_STATE_LEN = 241;
 
 type BuildRestartBody = {
   employerWallet?: string;
   streamId?: string;
   teeAuthToken?: string;
+  createReplacement?: boolean;
 };
 
 type RestartTransactions = {
@@ -73,6 +79,7 @@ type FinalizeRestartBody = {
   privatePayrollPda?: string;
   permissionPda?: string;
   teeAuthToken?: string;
+  createReplacement?: boolean;
   signatures?: {
     closePrivatePayroll?: string;
 
@@ -107,7 +114,7 @@ function serializeBigint(value: bigint) {
 }
 
 async function getBaseProgramForEmployer(employerPubkey: PublicKey) {
-  const connection = new Connection(DEVNET_RPC, "confirmed");
+  const connection = new Connection(BASE_DEVNET_RPC_URL, "confirmed");
   const wallet = createReadonlyAnchorWallet(employerPubkey);
   const provider = new anchor.AnchorProvider(connection, wallet, {
     commitment: "confirmed",
@@ -149,7 +156,26 @@ async function serializeUnsignedTransaction(
 }
 
 async function getAccountInfo(connection: Connection, address: PublicKey) {
-  return connection.getAccountInfo(address, "confirmed");
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await connection.getAccountInfo(address, "confirmed");
+    } catch (error: unknown) {
+      lastError = error;
+      const message = error instanceof Error ? error.message.toLowerCase() : "";
+      const isRateLimited =
+        message.includes("429") || message.includes("too many requests");
+      if (!isRateLimited || attempt === 3) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to load base account info");
 }
 
 async function fetchPrivatePayrollState(args: {
@@ -171,8 +197,8 @@ async function fetchPrivatePayrollState(args: {
   }
 
   return {
-    accruedUnpaidMicro: readU64LE(data, 97),
-    totalPaidPrivateMicro: readU64LE(data, 105),
+    accruedUnpaidMicro: readU64LE(data, 225),
+    totalPaidPrivateMicro: readU64LE(data, 233),
   };
 }
 
@@ -192,7 +218,9 @@ async function resolveRestartState(args: {
   const stream = args.stream;
 
   if (stream.status !== "stopped") {
-    throw new Error("Only stopped streams can be restarted");
+    throw new Error(
+      "Only stopped streams can be fully closed or used to create a fresh replacement stream",
+    );
   }
 
   const employee = await getEmployeeById(employerWallet, stream.employeeId);
@@ -254,6 +282,7 @@ export async function POST(request: NextRequest) {
     const employerWallet = body.employerWallet?.trim();
     const streamId = body.streamId?.trim();
     const teeAuthToken = body.teeAuthToken?.trim();
+    const createReplacement = body.createReplacement !== false;
 
     if (!employerWallet) {
       return badRequest("employerWallet is required");
@@ -265,7 +294,7 @@ export async function POST(request: NextRequest) {
 
     if (!teeAuthToken) {
       return badRequest(
-        "teeAuthToken is required to build stopped-stream restart transactions",
+        "teeAuthToken is required to build stopped-stream cleanup transactions",
       );
     }
 
@@ -274,14 +303,16 @@ export async function POST(request: NextRequest) {
       return badRequest("Stream not found for this employer", 404);
     }
 
-    const activeOrPausedDuplicate = (await listStreams(employerWallet)).find(
-      (candidate) =>
-        candidate.employeeId === stream.employeeId &&
-        candidate.id !== stream.id &&
-        candidate.status !== "stopped",
-    );
+    const activeOrPausedDuplicate = createReplacement
+      ? (await listStreams(employerWallet)).find(
+          (candidate) =>
+            candidate.employeeId === stream.employeeId &&
+            candidate.id !== stream.id &&
+            candidate.status !== "stopped",
+        )
+      : null;
 
-    if (activeOrPausedDuplicate) {
+    if (createReplacement && activeOrPausedDuplicate) {
       return NextResponse.json(
         {
           employerWallet,
@@ -321,11 +352,11 @@ export async function POST(request: NextRequest) {
 
     if (actualAccruedUnpaidMicro > BigInt(0)) {
       return badRequest(
-        `Cannot restart this stopped stream because it still has ${(
+        `Cannot clean up this stopped stream because it still has ${(
           Number(actualAccruedUnpaidMicro) / 1_000_000
         ).toFixed(
           6,
-        )} USDC of accrued unpaid payroll on-chain. Final settlement support for stopped streams must be completed first.`,
+        )} USDC of accrued unpaid payroll on-chain. Settle or withdraw the remaining payroll first, then close the stream.`,
         409,
       );
     }
@@ -437,7 +468,7 @@ export async function POST(request: NextRequest) {
     const message =
       error instanceof Error
         ? error.message
-        : "Failed to build stopped-stream restart transactions";
+        : "Failed to build stopped-stream cleanup transactions";
 
     return badRequest(message);
   }
@@ -453,6 +484,7 @@ export async function PATCH(request: NextRequest) {
     const privatePayrollPda = body.privatePayrollPda?.trim();
     const permissionPda = body.permissionPda?.trim();
     const teeAuthToken = body.teeAuthToken?.trim();
+    const createReplacement = body.createReplacement !== false;
     const signatures = body.signatures ?? {};
 
     if (!employerWallet) {
@@ -471,7 +503,7 @@ export async function PATCH(request: NextRequest) {
 
     if (!teeAuthToken) {
       return badRequest(
-        "teeAuthToken is required to finalize stopped-stream restart",
+        "teeAuthToken is required to finalize stopped-stream cleanup",
       );
     }
 
@@ -490,14 +522,14 @@ export async function PATCH(request: NextRequest) {
       state.privatePayrollState?.accruedUnpaidMicro ?? BigInt(0);
     if (actualAccruedUnpaidMicro > BigInt(0)) {
       return badRequest(
-        "Cannot finalize restart while this stopped stream still has accrued unpaid payroll on-chain",
+        "Cannot finalize cleanup while this stopped stream still has accrued unpaid payroll on-chain",
         409,
       );
     }
 
     if (state.privatePayrollState && !signatures.closePrivatePayroll?.trim()) {
       return badRequest(
-        "closePrivatePayroll signature is required to finalize restart",
+        "closePrivatePayroll signature is required to finalize cleanup",
       );
     }
 
@@ -507,7 +539,7 @@ export async function PATCH(request: NextRequest) {
       !signatures.undelegateEmployee?.trim()
     ) {
       return badRequest(
-        "undelegateEmployee signature is required to finalize restart",
+        "undelegateEmployee signature is required to finalize cleanup",
       );
     }
 
@@ -517,24 +549,39 @@ export async function PATCH(request: NextRequest) {
       !signatures.closeEmployee?.trim()
     ) {
       return badRequest(
-        "closeEmployee signature is required to finalize restart",
+        "closeEmployee signature is required to finalize cleanup",
       );
     }
 
-    const existingReplacement = (await listStreams(employerWallet)).find(
-      (candidate) =>
-        candidate.employeeId === stream.employeeId &&
-        candidate.id !== stream.id &&
-        candidate.status !== "stopped",
-    );
+    const existingReplacement = createReplacement
+      ? (await listStreams(employerWallet)).find(
+          (candidate) =>
+            candidate.employeeId === stream.employeeId &&
+            candidate.id !== stream.id &&
+            candidate.status !== "stopped",
+        )
+      : null;
 
-    if (existingReplacement) {
+    if (createReplacement && existingReplacement) {
       return NextResponse.json(
         {
           message:
             "A fresh replacement stream already exists for this employee",
           previousStream: stream,
           stream: existingReplacement,
+          signatures,
+        },
+        { status: 200 },
+      );
+    }
+
+    if (!createReplacement) {
+      return NextResponse.json(
+        {
+          message:
+            "Stream cleanup completed. This payroll stream is now fully closed.",
+          previousStream: stream,
+          stream,
           signatures,
         },
         { status: 200 },
@@ -566,7 +613,7 @@ export async function PATCH(request: NextRequest) {
     const message =
       error instanceof Error
         ? error.message
-        : "Failed to finalize stopped-stream restart";
+        : "Failed to finalize stopped-stream cleanup";
 
     return badRequest(message);
   }

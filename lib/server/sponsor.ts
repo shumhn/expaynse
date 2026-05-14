@@ -5,6 +5,8 @@ import {
   markEmployeePrivateRecipientInitialized,
   updateEmployeePrivateRecipientInitState,
 } from "@/lib/server/payroll-store";
+import { findCompanyByEmployerWallet } from "@/lib/server/company-store";
+import { loadCompanyKeypair } from "@/lib/server/company-key-vault";
 
 export function getSponsorKeypair(): Keypair | null {
   const pkStr = process.env.SPONSOR_PRIVATE_KEY;
@@ -17,7 +19,64 @@ export function getSponsorKeypair(): Keypair | null {
   }
 }
 
-export async function sponsorInitializeEmployeeVault(employeeWallet: string) {
+async function resolveAutoInitKeypair(employerWallet?: string) {
+  const sponsor = getSponsorKeypair();
+  if (sponsor) {
+    return {
+      signer: sponsor,
+      source: "sponsor" as const,
+      label: "system sponsor wallet",
+    };
+  }
+
+  if (!employerWallet?.trim()) {
+    return null;
+  }
+
+  const company = await findCompanyByEmployerWallet(employerWallet.trim());
+  if (!company) {
+    return null;
+  }
+
+  try {
+    const treasury = await loadCompanyKeypair({
+      companyId: company.id,
+      kind: "treasury",
+    });
+    return {
+      signer: treasury,
+      source: "company_treasury" as const,
+      label: "company treasury wallet",
+    };
+  } catch (error) {
+    console.warn(
+      `Failed to load treasury keypair for company ${company.id}:`,
+      error,
+    );
+    return null;
+  }
+}
+
+function normalizeAutoInitError(error: unknown, signerLabel: string) {
+  const message =
+    error instanceof Error ? error.message : "Sponsor initialization failed";
+
+  if (
+    message.includes(
+      "Attempt to debit an account but found no record of a prior credit",
+    ) ||
+    message.toLowerCase().includes("prior credit")
+  ) {
+    return `${signerLabel} has no funded base USDC available for auto-init.`;
+  }
+
+  return message;
+}
+
+export async function sponsorInitializeEmployeeVault(
+  employeeWallet: string,
+  employerWallet?: string,
+) {
   const attemptedAt = new Date().toISOString();
   await updateEmployeePrivateRecipientInitState({
     employeeWallet,
@@ -26,22 +85,26 @@ export async function sponsorInitializeEmployeeVault(employeeWallet: string) {
     error: null,
   });
 
-  const sponsor = getSponsorKeypair();
-  if (!sponsor) {
-    console.warn("No Sponsor Keypair found. Employee vault must be initialized manually.");
+  const autoInitSigner = await resolveAutoInitKeypair(employerWallet);
+  if (!autoInitSigner) {
+    console.warn(
+      "No sponsor keypair or company treasury keypair found. Employee vault must be initialized manually.",
+    );
     await updateEmployeePrivateRecipientInitState({
       employeeWallet,
       status: "failed",
       timestamp: attemptedAt,
-      error: "Sponsor wallet is not configured. Employee must self-initialize.",
+      error:
+        "Server auto-init is unavailable because no sponsor or treasury signer is configured.",
     });
     return false;
   }
 
   try {
-    // Build transfer of 1 micro-USDC (0.000001) from Sponsor (Base) to Employee (Ephemeral)
+    // Build transfer of 1 micro-USDC (0.000001) from the server-side auto-init signer
+    // (sponsor if configured, otherwise company treasury) to the employee ephemeral balance.
     const build = await buildPrivateTransfer({
-      from: sponsor.publicKey.toBase58(),
+      from: autoInitSigner.signer.publicKey.toBase58(),
       to: employeeWallet,
       amountMicro: 1, // Minimum allowed
       balances: { fromBalance: "base", toBalance: "ephemeral" }
@@ -54,9 +117,9 @@ export async function sponsorInitializeEmployeeVault(employeeWallet: string) {
     // Define server-side signing function
     const signTransaction = async (tx: Transaction | VersionedTransaction) => {
       if (tx instanceof VersionedTransaction) {
-        tx.sign([sponsor]);
+        tx.sign([autoInitSigner.signer]);
       } else {
-        tx.sign(sponsor);
+        tx.sign(autoInitSigner.signer);
       }
       return tx;
     };
@@ -73,15 +136,24 @@ export async function sponsorInitializeEmployeeVault(employeeWallet: string) {
       signature,
     );
 
-    console.log(`Successfully initialized vault for ${employeeWallet} via Sponsor`);
+    console.log(
+      `Successfully initialized vault for ${employeeWallet} via ${autoInitSigner.label}`,
+    );
     return true;
   } catch (error) {
-    console.error(`Sponsor failed to initialize vault for ${employeeWallet}:`, error);
+    const normalizedMessage = normalizeAutoInitError(
+      error,
+      autoInitSigner.label,
+    );
+    console.error(
+      `${autoInitSigner.label} failed to initialize vault for ${employeeWallet}:`,
+      error,
+    );
     await updateEmployeePrivateRecipientInitState({
       employeeWallet,
       status: "failed",
       timestamp: new Date().toISOString(),
-      error: error instanceof Error ? error.message : "Sponsor initialization failed",
+      error: normalizedMessage,
     });
     return false;
   }

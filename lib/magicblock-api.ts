@@ -47,11 +47,14 @@ export function isJwtExpired(token: string, bufferSeconds = 60): boolean {
 }
 
 const BASE = "https://payments.magicblock.app/v1/spl";
+const SWAP_BASE = "https://payments.magicblock.app/v1/swap";
 const HEALTH_URL = "https://payments.magicblock.app/health";
 export const DEVNET_USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
 
-// Standard devnet RPC
-const devnetConnection = new Connection(clusterApiUrl("devnet"), "confirmed");
+// Standard base RPC for devnet flows
+const BASE_DEVNET_RPC_URL =
+  process.env.NEXT_PUBLIC_SOLANA_RPC_URL || clusterApiUrl("devnet");
+const devnetConnection = new Connection(BASE_DEVNET_RPC_URL, "confirmed");
 
 // MagicBlock ephemeral rollup RPC
 const EPHEMERAL_RPC = "https://devnet.magicblock.app";
@@ -102,6 +105,82 @@ export interface MagicBlockHealthResponse {
   [key: string]: unknown;
 }
 
+export type SwapMode = "ExactIn" | "ExactOut";
+export type SwapVisibility = "public" | "private";
+
+export interface SwapQuoteParams {
+  inputMint: string;
+  outputMint: string;
+  amount: string;
+  slippageBps?: number;
+  swapMode?: SwapMode;
+  dexes?: string;
+  excludeDexes?: string;
+  restrictIntermediateTokens?: boolean;
+  onlyDirectRoutes?: boolean;
+  asLegacyTransaction?: boolean;
+  platformFeeBps?: number;
+  maxAccounts?: number;
+  instructionVersion?: "V1" | "V2";
+  dynamicSlippage?: boolean;
+  forJitoBundle?: boolean;
+  supportDynamicIntermediateTokens?: boolean;
+}
+
+export interface SwapQuoteResponse {
+  inputMint: string;
+  inAmount: string;
+  outputMint: string;
+  outAmount: string;
+  otherAmountThreshold: string;
+  swapMode: SwapMode;
+  slippageBps: number;
+  priceImpactPct: string;
+  routePlan: Array<Record<string, unknown>>;
+  contextSlot: number;
+  timeTaken: number;
+  [key: string]: unknown;
+}
+
+export interface PrivateSwapOptions {
+  destination: string;
+  minDelayMs: string;
+  maxDelayMs: string;
+  split: number;
+  clientRefId?: string;
+  validator?: string;
+}
+
+export interface BuildSwapRequest {
+  userPublicKey: string;
+  quoteResponse: SwapQuoteResponse;
+  payer?: string;
+  wrapAndUnwrapSol?: boolean;
+  useSharedAccounts?: boolean;
+  feeAccount?: string;
+  trackingAccount?: string;
+  prioritizationFeeLamports?: number | Record<string, unknown>;
+  asLegacyTransaction?: boolean;
+  destinationTokenAccount?: string;
+  nativeDestinationAccount?: string;
+  dynamicComputeUnitLimit?: boolean;
+  skipUserAccountsRpcCalls?: boolean;
+  dynamicSlippage?: boolean;
+  computeUnitPriceMicroLamports?: number;
+  blockhashSlotsToExpiry?: number;
+  positiveSlippage?: Record<string, unknown>;
+  visibility?: SwapVisibility;
+  privateOptions?: PrivateSwapOptions;
+}
+
+export interface BuildSwapResponse {
+  swapTransaction: string;
+  lastValidBlockHeight: number;
+  prioritizationFeeLamports?: number;
+  privateTransfer?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 // ── helpers ──
 
 async function post(
@@ -135,6 +214,41 @@ async function get(path: string, token?: string) {
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`PER API ${path} failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+async function getAbsolute(url: string, token?: string) {
+  const headers: Record<string, string> = token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
+
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`PER API ${url} failed (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+async function postAbsolute(
+  url: string,
+  body: Record<string, unknown>,
+  token?: string,
+) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`PER API ${url} failed (${res.status}): ${text}`);
   }
   return res.json();
 }
@@ -175,9 +289,12 @@ function isAlreadyProcessedError(error: unknown) {
 
 function isWritableAccountVerificationError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  return message
-    .toLowerCase()
-    .includes("transaction loads a writable account that cannot be written");
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("transaction loads a writable account that cannot be written") ||
+    normalized.includes("invalidwritableaccount") ||
+    normalized.includes("invalid writable account")
+  );
 }
 
 function sleep(ms: number) {
@@ -342,7 +459,9 @@ export async function signAndSend(
   const conn = opts.rpcUrl
     ? new Connection(opts.rpcUrl, "confirmed")
     : getConnection(opts.sendTo || "base");
-  const isEphemeral = opts.sendTo === "ephemeral" || Boolean(opts.rpcUrl);
+  const isEphemeral = opts.sendTo
+    ? opts.sendTo === "ephemeral"
+    : Boolean(opts.rpcUrl);
 
   // ── Ephemeral path ──
   if (isEphemeral) {
@@ -416,31 +535,47 @@ export async function signAndSend(
     signed = await signTransaction(tx);
   }
 
-  const raw =
-    signed instanceof VersionedTransaction
-      ? signed.serialize()
-      : signed.serialize();
+  const maxAttempts = Math.max(2, (opts.retrySendCount ?? 0) + 2);
+  const retryDelayMs = Math.max(300, opts.retryDelayMs ?? 600);
 
-  try {
-    const blockhash = getTxRecentBlockhash(signed);
-    const latestAtSend = await conn.getLatestBlockhash("confirmed");
-    const sig = await conn.sendRawTransaction(raw, { skipPreflight: false });
-    await confirmAndAssertSignature(conn, sig, {
-      blockhash: blockhash || latestAtSend.blockhash,
-      lastValidBlockHeight: latestAtSend.lastValidBlockHeight,
-    });
-    return sig;
-  } catch (error) {
-    if (isAlreadyProcessedError(error)) {
-      const recoveredSig = getTransactionSignature(signed);
-      if (recoveredSig) {
-        await assertSignatureSucceeded(conn, recoveredSig);
-        return recoveredSig;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      if (attempt > 1) {
+        await refreshRecentBlockhash(conn, signed);
       }
-    }
 
-    throw await enrichSendError(conn, error);
+      const raw =
+        signed instanceof VersionedTransaction
+          ? signed.serialize()
+          : signed.serialize();
+      const blockhash = getTxRecentBlockhash(signed);
+      const latestAtSend = await conn.getLatestBlockhash("confirmed");
+      const sig = await conn.sendRawTransaction(raw, { skipPreflight: false });
+      await confirmAndAssertSignature(conn, sig, {
+        blockhash: blockhash || latestAtSend.blockhash,
+        lastValidBlockHeight: latestAtSend.lastValidBlockHeight,
+      });
+      return sig;
+    } catch (error) {
+      if (isAlreadyProcessedError(error)) {
+        const recoveredSig = getTransactionSignature(signed);
+        if (recoveredSig) {
+          await assertSignatureSucceeded(conn, recoveredSig);
+          return recoveredSig;
+        }
+      }
+
+      const shouldRetry =
+        attempt < maxAttempts && isWritableAccountVerificationError(error);
+      if (!shouldRetry) {
+        throw await enrichSendError(conn, error);
+      }
+
+      await sleep(retryDelayMs);
+    }
   }
+
+  throw new Error("Transaction send failed after retry attempts.");
 }
 
 // ── Deserialize helper ──
@@ -543,6 +678,135 @@ export async function deposit(owner: string, amount: number, token?: string) {
   return res;
 }
 
+export async function getSwapQuote(
+  params: SwapQuoteParams,
+  token?: string,
+): Promise<SwapQuoteResponse> {
+  const search = new URLSearchParams();
+
+  search.set("inputMint", params.inputMint);
+  search.set("outputMint", params.outputMint);
+  search.set("amount", params.amount);
+
+  if (typeof params.slippageBps === "number") {
+    search.set("slippageBps", String(params.slippageBps));
+  }
+  if (params.swapMode) {
+    search.set("swapMode", params.swapMode);
+  }
+  if (params.dexes) {
+    search.set("dexes", params.dexes);
+  }
+  if (params.excludeDexes) {
+    search.set("excludeDexes", params.excludeDexes);
+  }
+  if (typeof params.restrictIntermediateTokens === "boolean") {
+    search.set(
+      "restrictIntermediateTokens",
+      String(params.restrictIntermediateTokens),
+    );
+  }
+  if (typeof params.onlyDirectRoutes === "boolean") {
+    search.set("onlyDirectRoutes", String(params.onlyDirectRoutes));
+  }
+  if (typeof params.asLegacyTransaction === "boolean") {
+    search.set("asLegacyTransaction", String(params.asLegacyTransaction));
+  }
+  if (typeof params.platformFeeBps === "number") {
+    search.set("platformFeeBps", String(params.platformFeeBps));
+  }
+  if (typeof params.maxAccounts === "number") {
+    search.set("maxAccounts", String(params.maxAccounts));
+  }
+  if (params.instructionVersion) {
+    search.set("instructionVersion", params.instructionVersion);
+  }
+  if (typeof params.dynamicSlippage === "boolean") {
+    search.set("dynamicSlippage", String(params.dynamicSlippage));
+  }
+  if (typeof params.forJitoBundle === "boolean") {
+    search.set("forJitoBundle", String(params.forJitoBundle));
+  }
+  if (typeof params.supportDynamicIntermediateTokens === "boolean") {
+    search.set(
+      "supportDynamicIntermediateTokens",
+      String(params.supportDynamicIntermediateTokens),
+    );
+  }
+
+  return (await getAbsolute(
+    `${SWAP_BASE}/quote?${search.toString()}`,
+    token,
+  )) as SwapQuoteResponse;
+}
+
+export async function buildSwap(
+  input: BuildSwapRequest,
+  token?: string,
+): Promise<BuildSwapResponse> {
+  const body: Record<string, unknown> = {
+    userPublicKey: input.userPublicKey,
+    quoteResponse: input.quoteResponse,
+  };
+
+  if (input.payer) body.payer = input.payer;
+  if (typeof input.wrapAndUnwrapSol === "boolean") {
+    body.wrapAndUnwrapSol = input.wrapAndUnwrapSol;
+  }
+  if (typeof input.useSharedAccounts === "boolean") {
+    body.useSharedAccounts = input.useSharedAccounts;
+  }
+  if (input.feeAccount) body.feeAccount = input.feeAccount;
+  if (input.trackingAccount) body.trackingAccount = input.trackingAccount;
+  if (typeof input.prioritizationFeeLamports !== "undefined") {
+    body.prioritizationFeeLamports = input.prioritizationFeeLamports;
+  }
+  if (typeof input.asLegacyTransaction === "boolean") {
+    body.asLegacyTransaction = input.asLegacyTransaction;
+  }
+  if (input.destinationTokenAccount) {
+    body.destinationTokenAccount = input.destinationTokenAccount;
+  }
+  if (input.nativeDestinationAccount) {
+    body.nativeDestinationAccount = input.nativeDestinationAccount;
+  }
+  if (typeof input.dynamicComputeUnitLimit === "boolean") {
+    body.dynamicComputeUnitLimit = input.dynamicComputeUnitLimit;
+  }
+  if (typeof input.skipUserAccountsRpcCalls === "boolean") {
+    body.skipUserAccountsRpcCalls = input.skipUserAccountsRpcCalls;
+  }
+  if (typeof input.dynamicSlippage === "boolean") {
+    body.dynamicSlippage = input.dynamicSlippage;
+  }
+  if (typeof input.computeUnitPriceMicroLamports === "number") {
+    body.computeUnitPriceMicroLamports = input.computeUnitPriceMicroLamports;
+  }
+  if (typeof input.blockhashSlotsToExpiry === "number") {
+    body.blockhashSlotsToExpiry = input.blockhashSlotsToExpiry;
+  }
+  if (input.positiveSlippage) {
+    body.positiveSlippage = input.positiveSlippage;
+  }
+  if (input.visibility) {
+    body.visibility = input.visibility;
+  }
+  if (input.visibility === "private" && input.privateOptions) {
+    body.destination = input.privateOptions.destination;
+    body.minDelayMs = input.privateOptions.minDelayMs;
+    body.maxDelayMs = input.privateOptions.maxDelayMs;
+    body.split = input.privateOptions.split;
+    if (input.privateOptions.clientRefId) {
+      body.clientRefId = input.privateOptions.clientRefId;
+    }
+    if (input.privateOptions.validator) {
+      body.validator = input.privateOptions.validator;
+    }
+  }
+
+  return (await postAbsolute(`${SWAP_BASE}/swap`, body, token)) as BuildSwapResponse;
+}
+
 // Private transfer — callers can choose whether funds move from base or ephemeral
 // into a base or ephemeral destination.
 export async function buildPrivateTransfer(
@@ -624,7 +888,8 @@ export async function privateTransfer(
 // Balance on base layer (regular Solana ATA)
 export async function getBalance(
   address: string,
-  token?: string
+  token?: string,
+  mint = DEVNET_USDC,
 ): Promise<BalanceResponse> {
   // /balance does not require auth — omit the header entirely when no token
   const headers: Record<string, string> = token
@@ -632,7 +897,7 @@ export async function getBalance(
     : {};
 
   const res = await fetch(
-    `${BASE}/balance?address=${address}&mint=${DEVNET_USDC}&cluster=devnet`,
+    `${BASE}/balance?address=${address}&mint=${mint}&cluster=devnet`,
     { headers }
   );
   if (!res.ok) {

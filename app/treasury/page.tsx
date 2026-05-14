@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState, useMemo, useRef } from "react";
+import { Suspense, useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { Loader2, Landmark, TrendingUp, Zap, AlertTriangle, Users, RefreshCw, Plus, ArrowDownLeft, ArrowUpRight, History, CalendarDays, CheckCircle2, XCircle, Search, Calendar, ShieldCheck, Clock, Download, ArrowUpFromLine } from "lucide-react";
 import { EmployerLayout } from "@/components/employer-layout";
@@ -16,7 +17,18 @@ import { toast } from "sonner";
 
 interface StreamInfo { id: string; status: "active" | "paused" | "stopped" | "pending"; ratePerSecond: number; totalPaid: number; accruedUnpaid: number; }
 interface SetupAction { id: string; type: "initialize-mint" | "fund-treasury"; date: string; amount?: number; txSig?: string; status: "success" | "failed"; }
-interface PayrollRun { id: string; date: string; totalAmount: number; employeeCount: number; recipientAddresses?: string[]; depositSig?: string; transferSig?: string; status: "success" | "failed"; }
+interface PayrollRun {
+  id: string;
+  date: string;
+  mode?: "streaming" | "private_payroll";
+  totalAmount: number;
+  employeeCount: number;
+  employeeNames?: string[];
+  recipientAddresses?: string[];
+  depositSig?: string;
+  transferSig?: string;
+  status: "success" | "failed";
+}
 interface ClaimRecord { id: string; date: string; amount: number; recipient: string; txSig?: string; status: "success" | "failed"; }
 
 type Transaction = {
@@ -27,11 +39,14 @@ type Transaction = {
   status: "success" | "failed";
   meta: string;
   txSig?: string;
+  payrollMode?: "streaming" | "private_payroll";
 };
 
-export default function TreasuryPage() {
+function TreasuryPageContent() {
   const { publicKey, signMessage } = useWallet();
   const { connection } = useConnection();
+  const searchParams = useSearchParams();
+  const router = useRouter();
   const [balance, setBalance] = useState<number | null>(null);
   const [baseBalance, setBaseBalance] = useState<number>(0);
   const [streams, setStreams] = useState<StreamInfo[]>([]);
@@ -46,6 +61,7 @@ export default function TreasuryPage() {
   const [employees, setEmployees] = useState<{wallet: string, name: string}[]>([]);
 
   const [filterTab, setFilterTab] = useState<"All" | "Deposits" | "Payouts">("All");
+  const [payrollModeFilter, setPayrollModeFilter] = useState<"All" | "Streaming" | "Private Payroll">("All");
   const [searchQuery, setSearchQuery] = useState("");
   const [chartRange, setChartRange] = useState<"24H" | "7D" | "30D" | "All">("30D");
 
@@ -55,6 +71,7 @@ export default function TreasuryPage() {
 
   const walletAddr = publicKey?.toBase58();
   const tokenCache = useRef<string | null>(null);
+  const depositIntent = searchParams.get("deposit") === "1";
 
   const getOrFetchToken = useCallback(async () => {
     if (tokenCache.current && !isJwtExpired(tokenCache.current)) return tokenCache.current;
@@ -150,6 +167,14 @@ export default function TreasuryPage() {
 
   useEffect(() => { void fetchData(); }, [fetchData]);
 
+  useEffect(() => {
+    if (!depositIntent) return;
+    if (!publicKey || !company) return;
+
+    setDepositOpen(true);
+    router.replace("/treasury");
+  }, [company, depositIntent, publicKey, router]);
+
   const active = streams.filter((s) => s.status === "active");
   const totalAccrued = streams.reduce((sum, s) => sum + s.accruedUnpaid, 0);
   const totalPaid = streams.reduce((sum, s) => sum + s.totalPaid, 0);
@@ -171,10 +196,15 @@ export default function TreasuryPage() {
       type: "Payroll Disbursement" as const,
       amount: a.totalAmount,
       status: a.status,
-      meta: a.recipientAddresses && a.recipientAddresses.length === 1 
+      meta: a.employeeNames && a.employeeNames.length > 0
+        ? a.employeeNames.join(", ")
+        : a.recipientAddresses && a.recipientAddresses.length === 1 
         ? getEmployeeName(a.recipientAddresses[0])
         : `${a.employeeCount} ${a.employeeCount === 1 ? 'Employee' : 'Employees'}`,
-      txSig: a.depositSig || a.transferSig
+      txSig: a.depositSig || a.transferSig,
+      payrollMode: (a.mode === "private_payroll" ? "private_payroll" : "streaming") as
+        | "streaming"
+        | "private_payroll",
     })),
     ...claimRecords.map(a => ({
       id: a.id,
@@ -187,21 +217,28 @@ export default function TreasuryPage() {
     }))
   ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
-  const filteredTransactions = transactions.filter(t => {
-    if (filterTab === "Deposits" && t.type !== "Private Vault Deposit") return false;
-    if (filterTab === "Payouts" && t.type !== "Payroll Disbursement" && t.type !== "Employee Claim") return false;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      return (
-        t.type.toLowerCase().includes(q) ||
-        t.meta.toLowerCase().includes(q) ||
-        t.amount.toString().includes(q) ||
-        (t.txSig && t.txSig.toLowerCase().includes(q)) ||
-        new Date(t.date).toLocaleDateString().toLowerCase().includes(q)
-      );
-    }
-    return true;
-  });
+  const filteredTransactions = useMemo(() => {
+    return transactions.filter(t => {
+      if (filterTab === "Deposits" && t.type !== "Private Vault Deposit") return false;
+      if (filterTab === "Payouts" && t.type !== "Payroll Disbursement" && t.type !== "Employee Claim") return false;
+      if (payrollModeFilter !== "All" && t.type === "Payroll Disbursement") {
+        const targetMode =
+          payrollModeFilter === "Private Payroll" ? "private_payroll" : "streaming";
+        if ((t.payrollMode ?? "streaming") !== targetMode) return false;
+      }
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        return (
+          t.type.toLowerCase().includes(q) ||
+          t.meta.toLowerCase().includes(q) ||
+          t.amount.toString().includes(q) ||
+          (t.txSig && t.txSig.toLowerCase().includes(q)) ||
+          new Date(t.date).toLocaleDateString().toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [filterTab, payrollModeFilter, searchQuery, transactions]);
 
   const totalDeposited = setupActions.filter(a => a.type === "fund-treasury").reduce((sum, a) => sum + (a.amount || 0), 0);
 
@@ -231,7 +268,13 @@ export default function TreasuryPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `expaynse_treasury_export_${new Date().toISOString().split('T')[0]}.csv`);
+    const modeSuffix =
+      payrollModeFilter === "All"
+        ? "all"
+        : payrollModeFilter === "Private Payroll"
+          ? "private-payroll"
+          : "streaming";
+    link.setAttribute("download", `expaynse_treasury_${modeSuffix}_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -515,6 +558,22 @@ export default function TreasuryPage() {
                 ))}
               </div>
 
+              <div className="flex bg-white/5 p-1 rounded-xl border border-white/10">
+                {["All", "Streaming", "Private Payroll"].map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setPayrollModeFilter(tab as typeof payrollModeFilter)}
+                    className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      payrollModeFilter === tab
+                        ? "bg-[#1eba98]/15 text-[#84f7dc]"
+                        : "text-[#8f8f95] hover:text-white"
+                    }`}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+
               <div className="relative hidden md:block">
                 <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#8f8f95]" />
                 <input
@@ -639,5 +698,13 @@ export default function TreasuryPage() {
         </div>
       </div>
     </EmployerLayout>
+  );
+}
+
+export default function TreasuryPage() {
+  return (
+    <Suspense fallback={null}>
+      <TreasuryPageContent />
+    </Suspense>
   );
 }

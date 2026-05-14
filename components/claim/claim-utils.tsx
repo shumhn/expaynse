@@ -2,6 +2,14 @@
 import { Waves, PauseCircle, Ban } from "lucide-react";
 import { type EmployeePayrollSummaryResponse } from "./use-claim-data";
 
+type LiveClaimableSnapshotLike = {
+  teeObservedAt: string;
+  status: "active" | "paused" | "stopped";
+  ratePerSecondMicro: string;
+  effectiveClaimableAmountMicro: string;
+  capReached: boolean;
+};
+
 export function getCurrentCycleSnapshot() {
   const now = new Date();
   const year = now.getUTCFullYear();
@@ -64,33 +72,45 @@ export function getLiveStateCopy(liveState: EmployeePayrollSummaryResponse["stre
     case "private-state-missing": return "Private payroll state is missing/expired in PER for this stream. Ask employer to re-onboard the stream and sync again.";
     case "stream-not-delegated": return "Your employer has not finished PER onboarding for this stream yet. Live private payroll data will appear here once delegation completes.";
     case "tee-token-missing": return "Live private payroll needs an authenticated TEE session. Refresh payroll and approve the message prompt to load live PER state.";
-    case "preview-unavailable": return "Live PER preview is unavailable right now. UI values stay locked until a signed refresh fetches current on-chain private state.";
+    case "snapshot-unavailable": return "Live PER snapshot is unavailable right now. UI values stay locked until a signed refresh fetches current on-chain private state.";
     default: return "Live private accrual based on your stream rate and the latest TEE timestamp.";
   }
 }
 
-export function computeAnimatedClaimableAmountMicro(args: {
-  preview: EmployeePayrollSummaryResponse["streams"][number]["preview"] | null | undefined;
-  liveState: EmployeePayrollSummaryResponse["streams"][number]["liveState"];
-  syncedAt: string | null | undefined;
+export function computeLiveClaimableAmountMicro(args: {
+  snapshot: LiveClaimableSnapshotLike | null | undefined;
   nowMs: number;
 }) {
-  if (!args.preview) return null;
-  let claimableMicro: bigint;
+  if (!args.snapshot) return null;
+
+  let snapshotClaimableMicro: bigint;
   let ratePerSecondMicro: bigint;
+  let teeObservedAtSeconds: bigint;
+
   try {
-    claimableMicro = BigInt(args.preview.effectiveClaimableAmountMicro);
-    ratePerSecondMicro = BigInt(args.preview.ratePerSecondMicro);
+    snapshotClaimableMicro = BigInt(args.snapshot.effectiveClaimableAmountMicro);
+    ratePerSecondMicro = BigInt(args.snapshot.ratePerSecondMicro);
+    teeObservedAtSeconds = BigInt(args.snapshot.teeObservedAt);
   } catch {
-    return args.preview.effectiveClaimableAmountMicro;
+    return args.snapshot.effectiveClaimableAmountMicro;
   }
-  if (!args.liveState.ready || args.preview.status !== "active") return claimableMicro.toString();
-  const syncedAtMs = Date.parse(args.syncedAt ?? "");
-  if (!Number.isFinite(syncedAtMs)) return claimableMicro.toString();
-  const elapsedMs = Math.max(0, Math.floor(args.nowMs - syncedAtMs));
-  if (elapsedMs <= 0) return claimableMicro.toString();
-  const accruedSinceSync = (ratePerSecondMicro * BigInt(elapsedMs)) / BigInt(1000);
-  return (claimableMicro + accruedSinceSync).toString();
+
+  if (
+    args.snapshot.status !== "active" ||
+    args.snapshot.capReached ||
+    ratePerSecondMicro <= BigInt(0)
+  ) {
+    return snapshotClaimableMicro.toString();
+  }
+
+  const nowSeconds = BigInt(Math.floor(args.nowMs / 1000));
+  if (nowSeconds <= teeObservedAtSeconds) {
+    return snapshotClaimableMicro.toString();
+  }
+
+  const elapsedSeconds = nowSeconds - teeObservedAtSeconds;
+  const accruedSinceSnapshot = ratePerSecondMicro * elapsedSeconds;
+  return (snapshotClaimableMicro + accruedSinceSnapshot).toString();
 }
 
 export function microToUsdc(value: string | null | undefined) {

@@ -6,16 +6,17 @@ import {
   RefreshCw,
   LogOut,
   ShieldCheck,
-  CircleHelp,
   Info,
   Send,
   AlertTriangle,
   CheckCircle2,
   Clock3,
+  ExternalLink,
 } from "lucide-react";
 import Link from "next/link";
 import { EmployerLayout } from "@/components/employer-layout";
 import { useClaimData } from "@/components/claim/use-claim-data";
+import { computeLiveClaimableAmountMicro } from "@/components/claim/claim-utils";
 import { toast } from "sonner";
 import { PublicKey } from "@solana/web3.js";
 import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
@@ -25,6 +26,12 @@ import {
   privateTransfer,
   signAndSend,
 } from "@/lib/magicblock-api";
+
+function formatDisplayedUsdcBalance(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0.00";
+  if (value >= 0.01) return value.toFixed(2);
+  return value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
 
 export default function ClaimWithdrawPage() {
   const {
@@ -46,6 +53,7 @@ export default function ClaimWithdrawPage() {
     fetchPrivateBalance,
     fetchEmployeePayrollSummary,
     getOrFetchToken,
+    liveNowMs,
   } = useClaimData();
   const [visiblePrivBalance, setVisiblePrivBalance] = useState<string | null>(null);
   const [withdrawAmount, setWithdrawAmount] = useState<string>("");
@@ -107,15 +115,6 @@ export default function ClaimWithdrawPage() {
     fetchEmployeePayrollSummary,
   ]);
 
-  useEffect(() => {
-    if (!publicKey) return;
-    const poll = setInterval(() => {
-      void fetchPrivateBalance({ silent: true });
-      void fetchEmployeePayrollSummary({ silent: true, interactive: false });
-    }, 5000);
-    return () => clearInterval(poll);
-  }, [publicKey, fetchPrivateBalance, fetchEmployeePayrollSummary]);
-
   const getErrorMessage = (error: unknown) => {
     if (error instanceof Error) return error.message;
     return "Unknown error";
@@ -127,77 +126,71 @@ export default function ClaimWithdrawPage() {
 
   const effectivePrivBalance = visiblePrivBalance ?? privBalance ?? "0";
   const privBalanceNum = parseFloat(effectivePrivBalance);
+  const displayedPrivBalance = formatDisplayedUsdcBalance(privBalanceNum);
+  const canUsePrivateBalance =
+    privateAccountInitialized || privBalanceNum > 0;
   const primaryPayrollStream = payrollSummary?.streams?.[0];
-  const hasLivePreview = Boolean(
-    primaryPayrollStream?.preview && primaryPayrollStream?.liveState?.ready,
+  const hasPrivatePayrollMode =
+    payrollSummary?.employees?.some(
+      (employee) => employee.payrollMode === "private_payroll",
+    ) ?? false;
+  const canonicalSnapshot = primaryPayrollStream?.snapshot ?? null;
+  const hasLiveSnapshot = Boolean(
+    canonicalSnapshot && primaryPayrollStream?.liveState?.ready,
   );
   const liveClaimableMicros =
-    hasLivePreview
-      ? Number(primaryPayrollStream?.preview?.effectiveClaimableAmountMicro ?? 0) ||
-        Number(primaryPayrollStream?.preview?.claimableAmountMicro ?? 0) ||
-        0
+    hasLiveSnapshot && canonicalSnapshot
+      ? Number(
+          computeLiveClaimableAmountMicro({
+            snapshot: canonicalSnapshot,
+            nowMs: liveNowMs,
+          }) ?? 0,
+        ) || 0
       : 0;
   const liveClaimableUsdc = liveClaimableMicros / 1_000_000;
   const requestMaxUsdc = liveClaimableUsdc > 0 ? liveClaimableUsdc : 0;
+  useEffect(() => {
+    if (!publicKey) return;
+    const correctionPollMs = hasLiveSnapshot ? 4000 : 8000;
+    const poll = setInterval(() => {
+      void fetchPrivateBalance({ silent: true });
+      void fetchEmployeePayrollSummary({ silent: true, interactive: false });
+    }, correctionPollMs);
+    return () => clearInterval(poll);
+  }, [
+    publicKey,
+    fetchPrivateBalance,
+    fetchEmployeePayrollSummary,
+    hasLiveSnapshot,
+  ]);
   const pendingRequest = cashoutRequests.find((r) => r.status === "pending");
   const hasPendingRequest = !!pendingRequest || !!onChainPendingClaim;
   const employeeClaimState = !registeredEmployeeWallet
     ? "not_registered"
-    : !privateAccountInitialized
+    : !canUsePrivateBalance
       ? "needs_private_init"
       : hasPendingRequest
         ? "claim_pending"
         : privBalanceNum > 0
           ? "balance_available"
-          : hasLivePreview
+          : hasLiveSnapshot
             ? "ready_to_claim"
             : "waiting_for_employer";
-
-  const employeeClaimSummary = {
-    not_registered: {
-      step: "Step 1",
-      title: "Ask your employer to add this wallet",
-      body: "This wallet is not on a payroll stream yet, so there is nothing to claim or withdraw.",
-    },
-    needs_private_init: {
-      step: "Step 2",
-      title: "Finish your one-time private setup",
-      body: privateInitStatus === "failed" && privateInitError
-        ? `Your last automatic setup attempt failed: ${privateInitError}`
-        : "Your employer has added you, but your private receiving account still needs one quick setup before salary can arrive.",
-    },
-    waiting_for_employer: {
-      step: "Step 3",
-      title: "Waiting for payroll activation",
-      body: "Your private account is ready. Your employer still needs to finish private payroll setup before salary becomes claimable.",
-    },
-    ready_to_claim: {
-      step: "Step 4",
-      title: "Claim salary into your private balance",
-      body: "Your payroll stream is live. Claim available salary privately first, then withdraw it to your wallet whenever you choose.",
-    },
-    balance_available: {
-      step: "Step 5",
-      title: "Withdraw your private balance",
-      body: "You already have settled funds in your private balance. Move them to your wallet or send them privately to another address.",
-    },
-    claim_pending: {
-      step: "In Progress",
-      title: "Finish your current claim first",
-      body: "You already have a payout in progress. Let it settle before starting another claim.",
-    },
-  }[employeeClaimState];
 
   const claimDisabledReason = !registeredEmployeeWallet
     ? "Your employer still needs to add this wallet to payroll."
     : !privateAccountInitialized
       ? "Set up your private account once before you claim salary."
       : !primaryPayrollStream?.stream?.id
-        ? "Your payroll stream is not ready yet."
+        ? hasPrivatePayrollMode
+          ? "Your employer has not sent a private payroll payout yet."
+          : "Your payroll stream is not ready yet."
         : hasPendingRequest
           ? "Finish your pending claim before starting a new one."
-          : !hasLivePreview
-            ? "Your employer still needs to finish private payroll setup."
+          : !hasLiveSnapshot
+            ? hasPrivatePayrollMode
+              ? "Your employer still needs to send a private payroll payout."
+              : "Your employer still needs to finish private payroll setup."
             : requestMaxUsdc <= 0
               ? "No salary is available to claim yet."
               : null;
@@ -664,8 +657,8 @@ export default function ClaimWithdrawPage() {
       toast.error("Please enter a valid amount");
       return;
     }
-    if (!hasLivePreview) {
-      toast.error("Live PER preview is required. Refresh and sign first.");
+    if (!hasLiveSnapshot) {
+      toast.error("Live PER snapshot is required. Refresh and sign first.");
       return;
     }
     if (requestMaxUsdc > 0 && amount > requestMaxUsdc) {
@@ -826,111 +819,68 @@ export default function ClaimWithdrawPage() {
 
   return (
     <EmployerLayout>
-      <div className="mx-auto max-w-6xl px-4 py-2 sm:px-6">
-        <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-          <div>
-            <h1 className="font-heading text-4xl font-bold tracking-tight text-white">
-              Withdraw Funds
-            </h1>
-            <p className="mt-2 max-w-lg text-sm leading-relaxed text-[#a8a8aa]">
-              Securely move your settled salary from your private vault to any
-              wallet.
-            </p>
-          </div>
-          <div className="flex w-fit rounded-2xl border border-white/10 bg-white/5 p-1 backdrop-blur-xl">
+      <div className="mx-auto max-w-4xl px-4 py-8 flex flex-col items-center">
+        <div className="mb-8 flex w-full flex-col items-center text-center">
+          <div className="mb-6 flex w-fit rounded-full border border-white/10 bg-white/5 p-1 backdrop-blur-xl">
             <Link
               href="/claim/dashboard"
-              className="flex h-9 min-w-[108px] items-center justify-center rounded-xl px-4 text-[10px] font-bold uppercase tracking-wider text-[#8f8f95] transition-all hover:bg-white/10 hover:text-white no-underline"
+              className="flex h-9 min-w-[108px] items-center justify-center rounded-full px-4 text-[10px] font-bold uppercase tracking-wider text-[#8f8f95] transition-all hover:bg-white/10 hover:text-white no-underline"
             >
-              Dashboard
+              Home
             </Link>
             <Link
               href="/claim/balances"
-              className="flex h-9 min-w-[108px] items-center justify-center rounded-xl px-4 text-[10px] font-bold uppercase tracking-wider text-[#8f8f95] transition-all hover:bg-white/10 hover:text-white no-underline"
+              className="flex h-9 min-w-[108px] items-center justify-center rounded-full px-4 text-[10px] font-bold uppercase tracking-wider text-[#8f8f95] transition-all hover:bg-white/10 hover:text-white no-underline"
             >
               Balances
             </Link>
-            <button className="h-9 min-w-[108px] rounded-xl bg-[#1eba98] px-4 text-[10px] font-bold uppercase tracking-wider text-black shadow-sm transition-all">
+            <button className="h-9 min-w-[108px] rounded-full bg-[#1eba98] px-4 text-[10px] font-bold uppercase tracking-wider text-black shadow-sm transition-all">
               Withdraw
             </button>
           </div>
-        </div>
-
-        <div className="mb-6 rounded-3xl border border-white/10 bg-white/5 p-5">
-          <p className="text-[10px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">
-            {employeeClaimSummary.step}
+          
+          <h1 className="font-heading text-3xl font-bold tracking-tight text-white">
+            Wallet
+          </h1>
+          <p className="mt-2 text-xs leading-relaxed text-[#a8a8aa]">
+            Manage your private salary and withdrawals.
           </p>
-          <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h2 className="text-xl font-bold tracking-tight text-white">
-                {employeeClaimSummary.title}
-              </h2>
-              <p className="mt-1 text-sm leading-relaxed text-[#a8a8aa]">
-                {employeeClaimSummary.body}
-              </p>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
-              <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#8f8f95]">
-                Current private balance
-              </p>
-              <p className="mt-1 text-lg font-bold text-white">
-                {privBalanceNum.toFixed(6)} USDC
-              </p>
-            </div>
-          </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-8 lg:grid-cols-5">
-          <div className="lg:col-span-3">
-            <div className="rounded-3xl border border-white/10 bg-[#0b0b0d] p-6 shadow-[0_10px_40px_rgba(0,0,0,0.35)] sm:p-8">
-              <div className="space-y-8">
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#8f8f95]">
-                    How this works
-                  </p>
-                  <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">1. Claim</p>
-                      <p className="mt-2 text-xs leading-relaxed text-[#b6b6bc]">
-                        Salary moves privately from your employer treasury into your private balance.
-                      </p>
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">2. Hold</p>
-                      <p className="mt-2 text-xs leading-relaxed text-[#b6b6bc]">
-                        Funds can stay private here until you are ready to move them.
-                      </p>
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                      <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">3. Withdraw</p>
-                      <p className="mt-2 text-xs leading-relaxed text-[#b6b6bc]">
-                        Send the private balance to your own wallet or another private destination.
-                      </p>
-                    </div>
-                  </div>
-                </div>
+        <div className="mb-6 w-full rounded-[32px] border border-white/10 bg-gradient-to-b from-white/10 to-white/5 p-8 text-center shadow-2xl backdrop-blur-md">
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#8f8f95]">
+            Private Balance
+          </p>
+          <p className="mt-3 text-4xl font-bold text-white tracking-tight">
+            {displayedPrivBalance} <span className="text-xl text-[#a8a8aa] font-medium">USDC</span>
+          </p>
+        </div>
 
+        <div className="w-full flex flex-col gap-8">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 w-full">
+            <div className="rounded-[32px] border border-white/10 bg-[#0b0b0d] p-5 shadow-[0_10px_40px_rgba(0,0,0,0.4)] sm:p-6 flex flex-col justify-between">
+              <div className="space-y-6">
                 <div>
-                  <label className="mb-4 block px-1 text-[10px] font-bold uppercase tracking-widest text-[#8f8f95]">
+                  <label className="mb-3 block px-1 text-[10px] font-bold uppercase tracking-widest text-[#8f8f95]">
                     Destination Wallet
                   </label>
-                  <div className="group rounded-2xl border border-white/10 bg-white/5 px-5 py-4 shadow-inner transition-all focus-within:border-[#1eba98]/40">
+                  <div className="group rounded-2xl border border-white/10 bg-white/5 px-5 py-3.5 shadow-inner transition-all focus-within:border-[#1eba98]/40">
                     <input
                       type="text"
                       placeholder="Enter Solana address"
                       value={inputWithdrawRecipient}
                       onChange={(e) => setWithdrawRecipient(e.target.value)}
-                      disabled={!privateAccountInitialized}
+                      disabled={!canUsePrivateBalance}
                       className="w-full bg-transparent text-sm font-bold text-white outline-none placeholder:text-[#62626b]"
                     />
                   </div>
-                  <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-1">
+                  <div className="mt-2.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between px-1">
                     <div className="flex items-center gap-2">
                       <Info size={12} className="text-[#8f8f95]" />
                       <p className="text-[10px] font-medium italic text-[#8f8f95]">
                         {isOwnWalletDestination
                           ? "Direct withdrawal to your base wallet."
-                          : "Transfer from your private balance to the destination wallet's base balance."}
+                          : "Transfer from your PER private balance to the destination wallet's base balance."}
                       </p>
                     </div>
                     <button
@@ -938,7 +888,7 @@ export default function ClaimWithdrawPage() {
                       onClick={() =>
                         setWithdrawRecipient(publicKey?.toBase58() ?? "")
                       }
-                      disabled={!privateAccountInitialized}
+                      disabled={!canUsePrivateBalance}
                       className="text-[10px] font-bold uppercase tracking-wider text-[#1eba98] transition-colors hover:text-[#64f0ce]"
                     >
                       Use My Wallet
@@ -952,12 +902,12 @@ export default function ClaimWithdrawPage() {
                 </div>
 
                 <div>
-                  <label className="mb-4 block px-1 text-[10px] font-bold uppercase tracking-widest text-[#8f8f95]">
+                  <label className="mb-3 block px-1 text-[10px] font-bold uppercase tracking-widest text-[#8f8f95]">
                     {isOwnWalletDestination
                       ? "Amount to Withdraw"
                       : "Amount to Send"}
                   </label>
-                  <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-5 py-4 shadow-inner transition-all focus-within:border-[#1eba98]/40">
+                  <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-5 py-3.5 shadow-inner transition-all focus-within:border-[#1eba98]/40">
                     <input
                       type="number"
                       placeholder={`Max ${privBalanceNum.toString()}`}
@@ -966,7 +916,7 @@ export default function ClaimWithdrawPage() {
                         setWithdrawAmount(e.target.value);
                         if (withdrawSyncNotice) setWithdrawSyncNotice("");
                       }}
-                      disabled={!privateAccountInitialized}
+                      disabled={!canUsePrivateBalance}
                       className="flex-1 bg-transparent text-lg font-bold text-white outline-none placeholder:text-[#62626b]"
                     />
                     <span className="text-[10px] font-bold uppercase tracking-widest text-[#8f8f95]">
@@ -978,7 +928,7 @@ export default function ClaimWithdrawPage() {
                         setWithdrawAmount(privBalanceNum.toString())
                       }
                       disabled={
-                        !privateAccountInitialized || privBalanceNum <= 0
+                        !canUsePrivateBalance || privBalanceNum <= 0
                       }
                       className="text-[10px] font-bold uppercase tracking-wider text-[#1eba98] transition-colors hover:text-[#64f0ce]"
                     >
@@ -998,8 +948,8 @@ export default function ClaimWithdrawPage() {
                   )}
                 </div>
 
-                <div className="flex flex-col gap-4 pt-4 sm:flex-row">
-                  {!privateAccountInitialized ? (
+                <div className="flex flex-col gap-3 pt-2 sm:flex-row">
+                  {!canUsePrivateBalance ? (
                     <button
                       onClick={handleInitialize}
                       disabled={
@@ -1014,14 +964,14 @@ export default function ClaimWithdrawPage() {
                       )}
                       {registeredEmployeeWallet
                         ? "Initialize First"
-                        : "No Stream Found"}
+                        : "No Employee Setup"}
                     </button>
                   ) : (
                     <>
                       <button
                         onClick={() => void fetchPrivateBalance()}
                         disabled={loading || withdrawing}
-                        className="flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-6 py-4 text-[11px] font-bold uppercase tracking-widest text-white transition-all hover:bg-white/10"
+                        className="flex h-14 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-5 text-[11px] font-bold uppercase tracking-widest text-white transition-all hover:bg-white/10"
                       >
                         {loading ? (
                           <Loader2 className="animate-spin" size={16} />
@@ -1037,7 +987,7 @@ export default function ClaimWithdrawPage() {
                           !isValidWithdrawRecipient ||
                           (withdrawAmount.trim() !== "" && !isValidAmount)
                         }
-                        className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-[#1eba98] py-4 text-[11px] font-bold uppercase tracking-widest text-black shadow-lg transition-all hover:bg-[#18a786] disabled:opacity-30"
+                        className="flex h-14 flex-1 items-center justify-center gap-2 rounded-xl bg-[#1eba98] px-6 text-[11px] font-bold uppercase tracking-widest text-black shadow-lg transition-all hover:bg-[#18a786] disabled:opacity-30"
                       >
                         {withdrawing ? (
                           <Loader2 className="animate-spin" size={16} />
@@ -1054,8 +1004,8 @@ export default function ClaimWithdrawPage() {
               </div>
             </div>
 
-            <div className="mt-6 rounded-3xl border border-white/10 bg-[#0b0b0d] p-6 shadow-[0_10px_40px_rgba(0,0,0,0.35)] sm:p-8">
-              <div className="mb-5 flex items-center justify-between">
+            <div className="rounded-[32px] border border-white/10 bg-[#0b0b0d] p-5 shadow-[0_10px_40px_rgba(0,0,0,0.4)] sm:p-6 flex flex-col justify-between">
+              <div className="mb-4 flex items-center justify-between">
                 <h3 className="text-lg font-bold text-white">
                   Claim Salary
                 </h3>
@@ -1074,7 +1024,7 @@ export default function ClaimWithdrawPage() {
               </div>
 
 	              {onChainPendingClaim && ["needs_sync", "paying"].includes(onChainPendingClaim.status) ? (
-                <div className="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3">
+                <div className="mb-3 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3">
 	                  <p className="text-xs font-bold text-rose-200 mb-2">
                     {onChainPendingClaim.status === "needs_sync"
 	                      ? "Your last payout reached your private balance, but the final bookkeeping step still needs to sync."
@@ -1092,9 +1042,9 @@ export default function ClaimWithdrawPage() {
               ) : null}
 
               {onChainPendingClaim && onChainPendingClaim.status === "failed" ? (
-                <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
+                <div className="mb-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
                   <p className="text-xs font-bold text-red-200 mb-2">
-                    Your claim payout failed, likely due to insufficient funds in your employer's treasury. You can retry the payout.
+                    Your claim payout failed, likely due to insufficient funds in your employer&apos;s treasury. You can retry the payout.
                   </p>
                   <div className="flex flex-col gap-2 sm:flex-row">
                     <button
@@ -1118,7 +1068,7 @@ export default function ClaimWithdrawPage() {
               ) : null}
 
               {onChainPendingClaim && onChainPendingClaim.status === "requested" ? (
-                <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+                <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
                   <p className="text-xs font-bold text-amber-200 mb-2">
                     Your claim is still pending on the payroll engine. You can wait for payout processing or cancel it to restore the amount back into claimable balance.
                   </p>
@@ -1134,14 +1084,14 @@ export default function ClaimWithdrawPage() {
               ) : null}
 
 	              {hasPendingRequest && (!onChainPendingClaim || !["requested", "needs_sync", "paying", "failed"].includes(onChainPendingClaim.status)) ? (
-	                <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+	                <div className="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
 	                  <p className="text-xs font-bold text-amber-200">
 	                    You already have a claim in progress. Wait for it to settle before starting another.
 	                  </p>
 	                </div>
 	              ) : null}
 
-              <div className="grid grid-cols-1 gap-4">
+              <div className="grid grid-cols-1 gap-3">
                 <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 shadow-inner transition-all focus-within:border-[#1eba98]/40">
                   <input
                     type="number"
@@ -1162,8 +1112,8 @@ export default function ClaimWithdrawPage() {
                   </button>
                 </div>
               </div>
-	              {!hasLivePreview ? (
-	                <p className="mt-3 text-[11px] text-amber-300">
+	              {!hasLiveSnapshot ? (
+	                <p className="mt-2.5 text-[11px] text-amber-300">
 	                  Claiming unlocks after your employer finishes payroll setup and live salary sync is available.
 	                </p>
 	              ) : null}
@@ -1171,7 +1121,7 @@ export default function ClaimWithdrawPage() {
                 <p className="text-[10px] text-[#8f8f95]">
                   Live claimable now:{" "}
                   <span className="font-bold text-[#64f0ce]">
-                    {hasLivePreview ? `${liveClaimableUsdc.toFixed(6)} USDC` : "—"}
+                    {hasLiveSnapshot ? `${liveClaimableUsdc.toFixed(6)} USDC` : "—"}
                   </span>
                 </p>
                 <button
@@ -1192,11 +1142,11 @@ export default function ClaimWithdrawPage() {
 	                  !registeredEmployeeWallet ||
 	                  !privateAccountInitialized ||
 	                  !primaryPayrollStream?.stream?.id ||
-	                  !hasLivePreview ||
+	                  !hasLiveSnapshot ||
 	                  requestMaxUsdc <= 0 ||
 	                  hasPendingRequest
                 }
-                className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-white/10 py-4 text-[11px] font-bold uppercase tracking-widest text-white shadow-sm transition-all hover:bg-white/20 disabled:opacity-30"
+                className="mt-4 flex h-14 w-full items-center justify-center gap-2 rounded-xl bg-white/10 px-6 text-[11px] font-bold uppercase tracking-widest text-white shadow-sm transition-all hover:bg-white/20 disabled:opacity-30"
               >
                 {submittingRequest ? (
                   <Loader2 className="animate-spin" size={16} />
@@ -1205,7 +1155,7 @@ export default function ClaimWithdrawPage() {
                 )}
                 {hasPendingRequest ? "Pending..." : "Claim Salary"}
               </button>
-	              <p className="mt-4 text-center text-[10px] text-[#62626b]">
+	              <p className="mt-3 text-center text-[10px] text-[#62626b]">
 	                Claimed salary lands in your private balance first, then you can withdraw it whenever you want.
 	              </p>
                 {claimDisabledReason ? (
@@ -1214,7 +1164,7 @@ export default function ClaimWithdrawPage() {
                   </p>
                 ) : null}
 
-              <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4">
                 <p className="mb-3 text-[10px] font-bold uppercase tracking-widest text-[#8f8f95]">
                   Recent Requests
                 </p>
@@ -1249,9 +1199,10 @@ export default function ClaimWithdrawPage() {
                 )}
               </div>
             </div>
+          </div>
 
-            <div className="mt-6 rounded-3xl border border-white/10 bg-[#0b0b0d] p-6 shadow-[0_10px_40px_rgba(0,0,0,0.35)] sm:p-8">
-              <div className="mb-5 flex items-center justify-between">
+          <div className="w-full rounded-[32px] border border-white/10 bg-[#0b0b0d] p-5 shadow-[0_10px_40px_rgba(0,0,0,0.4)] sm:p-6">
+            <div className="mb-4 flex items-center justify-between">
                 <div>
                   <h3 className="text-lg font-bold text-white">
                     Recent Withdrawals
@@ -1333,9 +1284,26 @@ export default function ClaimWithdrawPage() {
                                   ? record.providerMeta?.errorMessage ?? "The transaction did not complete."
                                   : "Funds were submitted successfully."}
                             </p>
-                            <p className="mt-2 text-[10px] uppercase tracking-widest text-[#62626b]">
-                              Tx: {formatTxSig(record.txSig)}
-                            </p>
+                            <div className="mt-3 flex items-center gap-2">
+                              <span className="text-[10px] font-bold uppercase tracking-widest text-[#62626b]">
+                                TX
+                              </span>
+                              {record.txSig ? (
+                                <a
+                                  href={`https://solscan.io/tx/${record.txSig}?cluster=devnet`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="group inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-[#a8a8aa] transition-all hover:border-white/20 hover:bg-white/10 hover:text-white"
+                                >
+                                  {formatTxSig(record.txSig)}
+                                  <ExternalLink size={12} className="opacity-60 group-hover:opacity-100" />
+                                </a>
+                              ) : (
+                                <span className="text-[10px] uppercase tracking-widest text-[#62626b]">
+                                  Not recorded
+                                </span>
+                              )}
+                            </div>
                           </div>
                           <div className="shrink-0 text-left sm:text-right">
                             <p className="text-sm font-bold text-white">
@@ -1353,54 +1321,7 @@ export default function ClaimWithdrawPage() {
               )}
             </div>
           </div>
-
-          <div className="lg:col-span-2 space-y-6">
-            <div className="rounded-3xl border border-[#1eba98]/30 bg-[#1eba98]/10 p-8">
-              <h4 className="mb-4 flex items-center gap-2 text-sm font-bold text-[#84f7dc]">
-                <ShieldCheck size={18} className="text-[#1eba98]" />
-                Privacy & Security
-              </h4>
-              <div className="space-y-4">
-                <div className="flex gap-3">
-                  <div className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#1eba98]" />
-                  <p className="text-xs leading-relaxed text-[#9ce8d5]">
-                    Transactions are settled via TEE (Trusted Execution
-                    Environments), meaning no one can see your withdrawal
-                    destination.
-                  </p>
-                </div>
-                <div className="flex gap-3">
-                  <div className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#1eba98]" />
-                  <p className="text-xs leading-relaxed text-[#9ce8d5]">
-                    Your employer sees that you claimed your salary, but not
-                    where the funds were sent.
-                  </p>
-                </div>
-                <div className="flex gap-3">
-                  <div className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#1eba98]" />
-                  <p className="text-xs leading-relaxed text-[#9ce8d5]">
-                    Funds remain encrypted in the MagicBlock Payments layer
-                    until they reach your chosen destination.
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-3xl border border-white/10 bg-[#0b0b0d] p-8">
-              <div className="mb-4 flex items-center gap-2 text-[#8f8f95]">
-                <CircleHelp size={16} />
-                <span className="text-[10px] font-bold uppercase tracking-widest">
-                  Help Center
-                </span>
-              </div>
-              <p className="text-xs leading-relaxed text-[#a8a8aa]">
-                Need to split your withdrawal or schedule recurring transfers?
-                Premium features are coming soon to the Expaynse dashboard.
-              </p>
-            </div>
-          </div>
         </div>
-      </div>
     </EmployerLayout>
   );
 }

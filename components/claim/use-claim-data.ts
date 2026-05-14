@@ -6,7 +6,6 @@ import { toast } from "sonner";
 import {
   getPrivateBalance,
   privateTransfer,
-  withdraw,
   signAndSend,
   fetchTeeAuthToken,
   isJwtExpired,
@@ -19,6 +18,40 @@ import {
 } from "@/lib/client/tee-auth-cache";
 import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
 import type { PayrollPayoutMode } from "@/lib/payroll-payout-mode";
+import type { PayrollMode } from "@/lib/payroll-mode";
+
+const CLAIM_DATA_CACHE_KEY = "expaynse:claim-data-cache";
+
+type ClaimDataCache = {
+  wallet: string;
+  privBalance: string | null;
+  payrollSummary: EmployeePayrollSummaryResponse | null;
+  privateAccountInitialized: boolean;
+  registeredEmployeeWallet: boolean;
+  privateInitStatus: EmployeePrivateInitStatusResponse["status"];
+  privateInitError: string | null;
+  privateInitMessage: string | null;
+};
+
+function loadClaimDataCache(): ClaimDataCache | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(CLAIM_DATA_CACHE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as ClaimDataCache;
+  } catch {
+    return null;
+  }
+}
+
+function saveClaimDataCache(cache: ClaimDataCache) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(CLAIM_DATA_CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    // ignore cache write failures
+  }
+}
 
 export interface EmployeePrivateInitStatusResponse {
   employeeWallet: string;
@@ -39,6 +72,7 @@ export interface EmployeePayrollSummaryResponse {
     id: string;
     employerWallet: string;
     name: string;
+    payrollMode: PayrollMode;
     privateRecipientInitializedAt: string | null;
   }>;
   streams: Array<{
@@ -68,20 +102,21 @@ export interface EmployeePayrollSummaryResponse {
     };
     liveState: {
       ready: boolean;
-      source: "per-preview" | "stream-metadata";
+      source: "per-snapshot" | "stream-metadata";
       reason:
-        | "preview-available"
+        | "snapshot-available"
         | "tee-token-missing"
         | "stream-not-delegated"
         | "private-account-not-initialized"
-        | "private-state-missing"
-        | "preview-unavailable";
+      | "private-state-missing"
+      | "snapshot-unavailable";
     };
-    preview: {
+    snapshot: {
       employeePda: string;
       privatePayrollPda: string;
       employee: string;
       streamId: string;
+      teeObservedAt: string;
       status: "active" | "paused" | "stopped";
       version: string;
       lastCheckpointTs: string;
@@ -89,9 +124,8 @@ export interface EmployeePayrollSummaryResponse {
       lastAccrualTimestamp: string;
       accruedUnpaidMicro: string;
       totalPaidPrivateMicro: string;
-      elapsedSeconds: number;
       pendingAccrualMicro: string;
-      claimableAmountMicro: string;
+      rawClaimableAmountMicro: string;
       effectiveClaimableAmountMicro: string;
       monthlyCapUsd: number | null;
       monthlyCapMicro: string | null;
@@ -110,24 +144,58 @@ export type MagicBlockHealthState = "checking" | "ok" | "error";
 
 export function useClaimData() {
   const { publicKey, signTransaction, signMessage, connected } = useWallet();
-  const [privBalance, setPrivBalance] = useState<string | null>(null);
-  const [payrollSummary, setPayrollSummary] = useState<EmployeePayrollSummaryResponse | null>(null);
+  const initialCache = loadClaimDataCache();
+  const [privBalance, setPrivBalance] = useState<string | null>(initialCache?.privBalance ?? null);
+  const [payrollSummary, setPayrollSummary] = useState<EmployeePayrollSummaryResponse | null>(
+    initialCache?.payrollSummary ?? null,
+  );
   const [payrollSummaryError, setPayrollSummaryError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingPayrollSummary, setLoadingPayrollSummary] = useState(false);
   const [initializingPrivateAccount, setInitializingPrivateAccount] = useState(false);
-  const [privateAccountInitialized, setPrivateAccountInitialized] = useState(false);
+  const [privateAccountInitialized, setPrivateAccountInitialized] = useState(
+    initialCache?.privateAccountInitialized ?? false,
+  );
   const [checkingPrivateInitStatus, setCheckingPrivateInitStatus] = useState(false);
-  const [registeredEmployeeWallet, setRegisteredEmployeeWallet] = useState(false);
-  const [privateInitStatus, setPrivateInitStatus] = useState<EmployeePrivateInitStatusResponse["status"]>("pending");
-  const [privateInitError, setPrivateInitError] = useState<string | null>(null);
-  const [privateInitMessage, setPrivateInitMessage] = useState<string | null>(null);
+  const [registeredEmployeeWallet, setRegisteredEmployeeWallet] = useState(
+    initialCache?.registeredEmployeeWallet ?? false,
+  );
+  const [privateInitStatus, setPrivateInitStatus] = useState<EmployeePrivateInitStatusResponse["status"]>(
+    initialCache?.privateInitStatus ?? "pending",
+  );
+  const [privateInitError, setPrivateInitError] = useState<string | null>(initialCache?.privateInitError ?? null);
+  const [privateInitMessage, setPrivateInitMessage] = useState<string | null>(initialCache?.privateInitMessage ?? null);
   const [withdrawing, setWithdrawing] = useState(false);
   const [magicBlockHealth, setMagicBlockHealth] = useState<MagicBlockHealthState>("checking");
+  const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
 
   const tokenCache = useRef<string | null>(null);
   const payrollSummaryInFlightRef = useRef(false);
   const payrollSummaryLastFetchAtRef = useRef(0);
+  const walletAddress = publicKey?.toBase58() ?? "";
+
+  useEffect(() => {
+    if (!walletAddress) return;
+    saveClaimDataCache({
+      wallet: walletAddress,
+      privBalance,
+      payrollSummary,
+      privateAccountInitialized,
+      registeredEmployeeWallet,
+      privateInitStatus,
+      privateInitError,
+      privateInitMessage,
+    });
+  }, [
+    walletAddress,
+    privBalance,
+    payrollSummary,
+    privateAccountInitialized,
+    registeredEmployeeWallet,
+    privateInitStatus,
+    privateInitError,
+    privateInitMessage,
+  ]);
 
   const resolveMagicBlockHealth = useCallback(
     (summary: EmployeePayrollSummaryResponse | null) => {
@@ -138,7 +206,7 @@ export function useClaimData() {
           (stream) =>
             stream.liveState?.reason === "tee-token-missing" ||
             stream.liveState?.reason === "private-state-missing" ||
-            stream.liveState?.reason === "preview-unavailable",
+            stream.liveState?.reason === "snapshot-unavailable",
         )
       ) {
         return "error" as MagicBlockHealthState;
@@ -150,15 +218,44 @@ export function useClaimData() {
 
   useEffect(() => {
     tokenCache.current = null;
-    setPrivBalance(null);
-    setPayrollSummary(null);
+    const cache = loadClaimDataCache();
+    if (publicKey) {
+      const nextWallet = publicKey.toBase58();
+      if (cache?.wallet === nextWallet) {
+        setPrivBalance(cache.privBalance);
+        setPayrollSummary(cache.payrollSummary);
+        setPrivateAccountInitialized(cache.privateAccountInitialized);
+        setRegisteredEmployeeWallet(cache.registeredEmployeeWallet);
+        setPrivateInitStatus(cache.privateInitStatus);
+        setPrivateInitError(cache.privateInitError);
+        setPrivateInitMessage(cache.privateInitMessage);
+      } else {
+        setPrivBalance(null);
+        setPayrollSummary(null);
+        setPrivateAccountInitialized(false);
+        setRegisteredEmployeeWallet(false);
+        setPrivateInitStatus("pending");
+        setPrivateInitError(null);
+        setPrivateInitMessage(null);
+      }
+    } else {
+      setPrivBalance(null);
+      setPayrollSummary(null);
+      setPrivateAccountInitialized(false);
+      setRegisteredEmployeeWallet(false);
+      setPrivateInitStatus("pending");
+      setPrivateInitError(null);
+      setPrivateInitMessage(null);
+    }
     setPayrollSummaryError(null);
-    setPrivateAccountInitialized(false);
-    setRegisteredEmployeeWallet(false);
-    setPrivateInitStatus("pending");
-    setPrivateInitError(null);
-    setPrivateInitMessage(null);
   }, [publicKey]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setLiveNowMs(Date.now());
+    }, 250);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const getOrFetchToken = useCallback(
     async (options?: { interactive?: boolean }) => {
@@ -298,6 +395,7 @@ export function useClaimData() {
     privateInitMessage,
     withdrawing,
     magicBlockHealth,
+    liveNowMs,
     setInitializingPrivateAccount,
     setWithdrawing,
     setMagicBlockHealth,

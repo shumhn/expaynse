@@ -18,6 +18,7 @@ import {
   formatMicroUsdc,
   formatPayrollRate,
   formatLastPrivateUpdate,
+  computeLiveClaimableAmountMicro,
 } from "@/components/claim/claim-utils";
 import { toast } from "sonner";
 import { signAndSend } from "@/lib/magicblock-api";
@@ -39,6 +40,7 @@ export default function ClaimBalancesPage() {
     fetchPrivateInitStatus,
     fetchPrivateBalance,
     fetchEmployeePayrollSummary,
+    liveNowMs,
   } = useClaimData();
 
   useEffect(() => {
@@ -50,31 +52,47 @@ export default function ClaimBalancesPage() {
   }, [publicKey, fetchPrivateInitStatus, fetchPrivateBalance, fetchEmployeePayrollSummary]);
 
   const primaryPayrollStream = payrollSummary?.streams?.[0];
+  const hasPrivatePayrollMode =
+    payrollSummary?.employees?.some(
+      (employee) => employee.payrollMode === "private_payroll",
+    ) ?? false;
+  const canonicalSnapshot = primaryPayrollStream?.snapshot ?? null;
   const getErrorMessage = (error: unknown) => {
     if (error instanceof Error) return error.message;
     return "Unknown error";
   };
-  const hasLivePreview = Boolean(primaryPayrollStream?.preview && primaryPayrollStream?.liveState?.ready);
+  const hasLiveSnapshot = Boolean(canonicalSnapshot && primaryPayrollStream?.liveState?.ready);
+  const correctionPollMs = hasLiveSnapshot ? 4000 : 8000;
   useEffect(() => {
     if (!publicKey) return;
     const poll = setInterval(() => {
       void fetchEmployeePayrollSummary({ silent: true, interactive: false });
       void fetchPrivateBalance({ silent: true });
-    }, hasLivePreview ? 1000 : 5000);
+    }, correctionPollMs);
     return () => clearInterval(poll);
-  }, [publicKey, fetchEmployeePayrollSummary, fetchPrivateBalance, hasLivePreview]);
+  }, [
+    publicKey,
+    fetchEmployeePayrollSummary,
+    fetchPrivateBalance,
+    correctionPollMs,
+  ]);
   const privateBalanceAmount = Number.parseFloat(privBalance ?? "0");
   const previewRatePerSecond =
-    hasLivePreview && primaryPayrollStream?.preview
-      ? Number(primaryPayrollStream.preview.ratePerSecondMicro) / 1_000_000
+    hasLiveSnapshot && canonicalSnapshot
+      ? Number(
+          canonicalSnapshot.ratePerSecondMicro,
+        ) / 1_000_000
       : NaN;
   const effectiveRatePerSecond =
     Number.isFinite(previewRatePerSecond) && previewRatePerSecond > 0
       ? previewRatePerSecond
       : 0;
   const exactPrimaryClaimableAmountMicro =
-    hasLivePreview && primaryPayrollStream?.preview
-      ? primaryPayrollStream.preview.effectiveClaimableAmountMicro
+    hasLiveSnapshot && canonicalSnapshot
+      ? computeLiveClaimableAmountMicro({
+          snapshot: canonicalSnapshot,
+          nowMs: liveNowMs,
+        })
       : null;
 
   const handleInitialize = async () => {
@@ -151,7 +169,7 @@ export default function ClaimBalancesPage() {
       ? "needs_private_init"
       : privateBalanceAmount > 0
         ? "balance_available"
-        : hasLivePreview
+        : hasLiveSnapshot
           ? "ready_to_claim"
           : "waiting_for_employer";
 
@@ -169,16 +187,24 @@ export default function ClaimBalancesPage() {
       label: "Set Up Account",
     },
     waiting_for_employer: {
-      title: "Payroll setup is still in progress",
-      body: "Your account is ready, but your employer still needs to activate payroll.",
+      title: hasPrivatePayrollMode
+        ? "Waiting for your next private payroll payout"
+        : "Payroll setup is still in progress",
+      body: hasPrivatePayrollMode
+        ? "Your account is ready. Your employer can now send salary privately, and it will appear in your private balance when paid."
+        : "Your account is ready, but your employer still needs to activate payroll.",
       href: "/claim/dashboard",
       label: "Check Status",
     },
     ready_to_claim: {
-      title: "Claim available salary",
-      body: "Move earned salary into your private balance whenever you are ready.",
+      title: hasPrivatePayrollMode
+        ? "Private salary is available"
+        : "Claim available salary",
+      body: hasPrivatePayrollMode
+        ? "Your employer has sent private payroll. Review your private balance and withdraw when you are ready."
+        : "Move earned salary into your private balance whenever you are ready.",
       href: "/claim/withdraw",
-      label: "Claim Salary",
+      label: hasPrivatePayrollMode ? "Open Withdraw" : "Claim Salary",
     },
     balance_available: {
       title: "Withdraw your private balance",
@@ -195,7 +221,9 @@ export default function ClaimBalancesPage() {
           <div>
             <h1 className="font-heading text-4xl font-bold tracking-tight text-white">My Balances</h1>
             <p className="mt-2 max-w-lg text-sm leading-relaxed text-[#a8a8aa]">
-              Detailed view of your private USDC vault and live streaming progress.
+              {hasPrivatePayrollMode
+                ? "MagicBlock PER shows your private balance and private payroll payouts. Base Solana is where you withdraw publicly."
+                : "Base Solana shows public wallet funds. MagicBlock PER shows your private balance and live payroll accrual."}
             </p>
           </div>
           <div className="flex w-fit rounded-2xl border border-white/10 bg-white/5 p-1 backdrop-blur-xl">
@@ -235,14 +263,18 @@ export default function ClaimBalancesPage() {
               <div className="mb-10">
                 <div className="flex items-baseline gap-2">
                   <span className="text-6xl font-bold tracking-tighter text-white">
-                    {hasLivePreview && exactPrimaryClaimableAmountMicro !== null
+                    {hasLiveSnapshot && exactPrimaryClaimableAmountMicro !== null
                       ? formatMicroUsdc(exactPrimaryClaimableAmountMicro, 6)
                       : "—"}
                   </span>
                   <span className="text-xl font-bold tracking-tight text-[#62626b]">USDC</span>
                 </div>
-                <p className="mt-2 text-xs text-[#a8a8aa]">Accrued from your active payroll stream.</p>
-                {hasLivePreview ? (
+                <p className="mt-2 text-xs text-[#a8a8aa]">
+                  {hasPrivatePayrollMode
+                    ? "Private payroll sent by your employer will appear here before withdrawal."
+                    : "Accrued from your active payroll stream."}
+                </p>
+                {hasLiveSnapshot ? (
                   <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-[#1eba98]/30 bg-[#1eba98]/10 px-3 py-1.5">
                     <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">
                       Payroll Source: Live PER
@@ -257,7 +289,9 @@ export default function ClaimBalancesPage() {
                   <div>
                     <p className="text-sm font-bold text-white">Pending Assignment</p>
                     <p className="mt-1 text-xs leading-relaxed text-[#a8a8aa]">
-                      Your wallet is not yet registered with an employer. Your live balance will appear once you are added to a payroll stream.
+                      {hasPrivatePayrollMode
+                        ? "Your wallet is not yet registered with an employer. Private payroll balances will appear once you are added."
+                        : "Your wallet is not yet registered with an employer. Your live balance will appear once you are added to a payroll stream."}
                     </p>
                   </div>
                 </div>
@@ -268,7 +302,9 @@ export default function ClaimBalancesPage() {
                     <div>
 	                      <p className="text-sm font-bold text-amber-200">Account Initialization Required</p>
 	                      <p className="mt-1 text-xs leading-relaxed text-amber-100/90">
-	                        To receive private USDC from your payroll streams, you must first initialize your private account.
+	                        {hasPrivatePayrollMode
+                            ? "To receive private payroll payouts, you must first initialize your private account."
+                            : "To receive private USDC from your payroll streams, you must first initialize your private account."}
 	                      </p>
                         {privateInitStatus === "failed" && privateInitError ? (
                           <p className="mt-2 text-xs leading-relaxed text-amber-100/80">
@@ -291,7 +327,9 @@ export default function ClaimBalancesPage() {
                   <div>
                     <p className="text-sm font-bold text-[#84f7dc]">Stream Active & Synced</p>
                     <p className="mt-1 text-xs leading-relaxed text-[#9ce8d5]">
-                      Your payroll stream is live. Accrued earnings update in real-time.
+                      {hasPrivatePayrollMode
+                        ? "Your private account is ready. Private payroll payouts will appear here after your employer runs payroll."
+                        : "Your payroll stream is live. Accrued earnings update in real-time."}
                     </p>
                   </div>
                 </div>
@@ -300,7 +338,7 @@ export default function ClaimBalancesPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="rounded-2xl border border-white/10 bg-[#0b0b0d] p-6">
-                <p className="mb-2 text-[9px] font-bold uppercase tracking-widest text-[#8f8f95]">Private Vault</p>
+                <p className="mb-2 text-[9px] font-bold uppercase tracking-widest text-[#8f8f95]">PER Private Balance</p>
                 <p className="text-xl font-bold text-white">{privBalance ?? "0.00"}</p>
                 <p className="mt-1 text-[10px] font-bold text-[#62626b]">USDC</p>
               </div>
@@ -311,12 +349,14 @@ export default function ClaimBalancesPage() {
                     ? formatPayrollRate(effectiveRatePerSecond)
                     : "0 USDC/sec"}
                 </p>
-                <p className="mt-1 text-[10px] font-bold text-[#62626b]">{hasLivePreview ? "TEE RATE" : "PER PREVIEW REQUIRED"}</p>
+                <p className="mt-1 text-[10px] font-bold text-[#62626b]">{hasLiveSnapshot ? "TEE RATE" : "PER SNAPSHOT REQUIRED"}</p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-[#0b0b0d] p-6">
                 <p className="mb-2 text-[9px] font-bold uppercase tracking-widest text-[#8f8f95]">Last Sync</p>
                 <p className="mt-1 text-sm font-bold text-white">
-                  {hasLivePreview && primaryPayrollStream?.preview ? formatLastPrivateUpdate(primaryPayrollStream.preview.lastAccrualTimestamp) : "PER preview unavailable"}
+                  {hasLiveSnapshot && canonicalSnapshot
+                    ? formatLastPrivateUpdate(canonicalSnapshot.lastAccrualTimestamp)
+                    : "PER snapshot unavailable"}
                 </p>
                 <p className="mt-1 text-[10px] font-bold text-[#62626b]">UTC</p>
               </div>

@@ -43,7 +43,11 @@ const PROGRAM_ID = new PublicKey(
 const DEVNET_TEE_VALIDATOR = new PublicKey(
   "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo",
 );
-const DEVNET_RPC = clusterApiUrl("devnet");
+const BASE_DEVNET_RPC =
+  process.env.NEXT_PUBLIC_SOLANA_RPC_URL || clusterApiUrl("devnet");
+const BASE_DEVNET_RPC_FALLBACKS = Array.from(
+  new Set([BASE_DEVNET_RPC, clusterApiUrl("devnet")].filter(Boolean)),
+);
 const TEE_URL = "https://devnet-tee.magicblock.app";
 type BuildOnboardingBody = {
   employerWallet?: string;
@@ -94,8 +98,33 @@ function toRateMicroUnits(ratePerSecond: number) {
   return Math.round(ratePerSecond * 1_000_000);
 }
 
+function isRpcRateLimitError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("429") || message.includes("too many requests");
+}
+
+async function getLatestBlockhashWithRetry(connection: Connection) {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await connection.getLatestBlockhash("confirmed");
+    } catch (error: unknown) {
+      lastError = error;
+      if (!isRpcRateLimitError(error) || attempt === 3) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to fetch recent blockhash");
+}
+
 async function getBaseProgramForEmployer(employerPubkey: PublicKey) {
-  const connection = new Connection(DEVNET_RPC, "confirmed");
+  const connection = new Connection(BASE_DEVNET_RPC, "confirmed");
   const wallet = createReadonlyAnchorWallet(employerPubkey);
   const provider = new AnchorProvider(connection, wallet, {
     commitment: "confirmed",
@@ -127,7 +156,7 @@ async function serializeUnsignedTransaction(
   feePayer: PublicKey,
   transaction: Transaction,
 ) {
-  const latest = await connection.getLatestBlockhash("confirmed");
+  const latest = await getLatestBlockhashWithRetry(connection);
   transaction.recentBlockhash = latest.blockhash;
   transaction.feePayer = feePayer;
   return transaction.serialize({
@@ -137,7 +166,22 @@ async function serializeUnsignedTransaction(
 }
 
 async function getAccountInfo(connection: Connection, address: PublicKey) {
-  return connection.getAccountInfo(address, "confirmed");
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await connection.getAccountInfo(address, "confirmed");
+    } catch (error: unknown) {
+      lastError = error;
+      if (!isRpcRateLimitError(error) || attempt === 3) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to load account info");
 }
 
 function isOwnedByProgram(
@@ -227,7 +271,7 @@ export async function POST(request: NextRequest) {
     const [
       employeeAccountInfo,
     ] = await Promise.all([
-      baseConnection.getAccountInfo(employeePda),
+      getAccountInfo(baseConnection, employeePda),
     ]);
 
     const employeeExistsOnBase = Boolean(employeeAccountInfo);
@@ -271,7 +315,10 @@ export async function POST(request: NextRequest) {
       baseInstructions.push(createPermissionIx);
     }
 
-    const permissionAccountInfo = await baseConnection.getAccountInfo(permissionPda);
+    const permissionAccountInfo = await getAccountInfo(
+      baseConnection,
+      permissionPda,
+    );
     const isPermissionDelegated = permissionAccountInfo ? permissionAccountInfo.owner.toBase58() === "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh" : false;
 
     // 3. Delegate Employee (Base) — V2: teleports employee shell into TEE
@@ -357,7 +404,8 @@ export async function POST(request: NextRequest) {
     }
 
     let resumeStreamSerialized: Uint8Array | undefined;
-    if (!isStreamActive) {
+    const shouldResumeDuringOnboarding = stream.status === "active";
+    if (shouldResumeDuringOnboarding && !isStreamActive) {
       console.log("  Building resumeStream instruction (TEE)...");
       const MAGIC_VAULT = new PublicKey("MagicVau1t999999999999999999999999999999999");
       const resumeStreamIx = await typedTeeProgram.methods
@@ -503,7 +551,7 @@ export async function PATCH(request: NextRequest) {
       return badRequest("permissionPda does not match the expected permission PDA", 409);
     }
 
-    const baseConnection = new Connection(DEVNET_RPC, "confirmed");
+    const baseConnection = new Connection(BASE_DEVNET_RPC, "confirmed");
     const [employeeAccountInfo, permissionAccountInfo] = await Promise.all([
       getAccountInfo(baseConnection, expectedEmployeePda),
       getAccountInfo(baseConnection, expectedPermissionPda),

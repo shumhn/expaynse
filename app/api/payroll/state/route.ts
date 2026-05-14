@@ -9,7 +9,6 @@ import {
   getEmployeeById,
   getStreamById,
   updateStreamRuntimeState,
-  updateStreamStatus,
   type PayrollStreamStatus,
 } from "@/lib/server/payroll-store";
 import {
@@ -25,6 +24,7 @@ type ExactPrivatePayrollState = {
   privatePayrollPda: string;
   employee: string;
   streamId: string;
+  teeObservedAt: string;
   status: PayrollStreamStatus;
   version: string;
   lastCheckpointTs: string;
@@ -118,6 +118,26 @@ function mapEmployeeStatusToStreamStatus(status?: number): PayrollStreamStatus {
   }
 }
 
+async function getConfirmedTeeUnixTimestamp(teeAuthToken: string) {
+  const connection = new Connection(
+    `${TEE_URL}?token=${encodeURIComponent(teeAuthToken)}`,
+    "confirmed",
+  );
+
+  try {
+    const slot = await connection.getSlot("confirmed");
+    const blockTime = await connection.getBlockTime(slot);
+
+    if (typeof blockTime === "number" && Number.isFinite(blockTime)) {
+      return blockTime;
+    }
+  } catch {
+    // Fall back to local time if confirmed TEE time is unavailable.
+  }
+
+  return Math.floor(Date.now() / 1000);
+}
+
 function decodePrivatePayrollState(
   data: Buffer,
   employeePda: PublicKey,
@@ -174,6 +194,7 @@ function decodePrivatePayrollState(
     privatePayrollPda: privatePayrollPda.toBase58(),
     employee: employee.toBase58(),
     streamId,
+    teeObservedAt: "0",
     status,
     version: String(version),
     lastCheckpointTs: String(lastCheckpointTs),
@@ -267,18 +288,29 @@ export async function GET(request: NextRequest) {
       streamId,
       teeAuthToken,
     });
+    const teeObservedAt = await getConfirmedTeeUnixTimestamp(teeAuthToken);
 
     const startsAtUnix = stream.startsAt
-      ? new Date(stream.startsAt).getTime()
+      ? Math.floor(new Date(stream.startsAt).getTime() / 1000)
       : employee.startDate
-        ? new Date(employee.startDate).getTime()
+        ? Math.floor(new Date(employee.startDate).getTime() / 1000)
         : null;
     const hasFutureStart =
       startsAtUnix !== null &&
       Number.isFinite(startsAtUnix) &&
-      startsAtUnix > Date.now();
-    const pendingAccrualMicro = BigInt(0);
-    const rawClaimableAmountMicro = BigInt(state.accruedUnpaidMicro);
+      startsAtUnix > teeObservedAt;
+    const shouldAccrue = state.status === "active" && !hasFutureStart;
+    const lastAccrualTimestamp = Number(state.lastAccrualTimestamp);
+    const elapsedSeconds =
+      shouldAccrue && Number.isFinite(lastAccrualTimestamp)
+        ? Math.max(0, teeObservedAt - lastAccrualTimestamp)
+        : 0;
+    const pendingAccrualMicro =
+      shouldAccrue
+        ? BigInt(state.ratePerSecondMicro) * BigInt(elapsedSeconds)
+        : BigInt(0);
+    const rawClaimableAmountMicro =
+      BigInt(state.accruedUnpaidMicro) + pendingAccrualMicro;
 
     const cap = evaluateMonthlyCap({
       stream,
@@ -287,6 +319,7 @@ export async function GET(request: NextRequest) {
       totalPaidPrivateMicro: BigInt(state.totalPaidPrivateMicro),
     });
 
+    state.teeObservedAt = String(teeObservedAt);
     state.rawClaimableAmountMicro = rawClaimableAmountMicro.toString();
     state.pendingAccrualMicro = pendingAccrualMicro.toString();
     state.effectiveClaimableAmountMicro = cap.effectiveClaimableAmountMicro;
@@ -318,14 +351,6 @@ export async function GET(request: NextRequest) {
         ? "paused"
         : state.status;
     state.status = resolvedStatus;
-
-    if (resolvedStatus !== stream.status) {
-      await updateStreamStatus({
-        employerWallet,
-        streamId,
-        status: resolvedStatus,
-      });
-    }
 
     const observedCheckpointCrankStatus = deriveObservedCheckpointCrankStatus({
       currentStatus: stream.checkpointCrankStatus,

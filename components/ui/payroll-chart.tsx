@@ -18,18 +18,26 @@ const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct
 function generateProjection(currentBalance: number, burnRate: number) {
   const data: Array<{ month: string; balance: number; isCritical: boolean }> = [];
   const now = new Date();
-  
+
   let balance = currentBalance;
   for (let i = 0; i < 7; i++) { // Current month + next 6
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
     data.push({
       month: MONTH_LABELS[d.getMonth()],
       balance: Math.max(0, balance),
-      isCritical: balance < (burnRate * 1.5) // Less than 1.5 months runway
+      isCritical: burnRate > 0 && balance < (burnRate * 1.5) // Less than 1.5 months runway
     });
     balance -= burnRate;
   }
   return data;
+}
+
+function formatAxisValue(value: number, maxValue: number) {
+  if (maxValue < 1000) {
+    return `$${Math.round(value)}`
+  }
+
+  return `$${(value / 1000).toFixed(0)}k`
 }
 
 function CustomTooltip({
@@ -53,6 +61,10 @@ function CustomTooltip({
 
 export function RunwayProjectionChart({ vaultBalance, monthlyBurnRate }: RunwayChartProps) {
   const data = useMemo(() => generateProjection(vaultBalance, monthlyBurnRate), [vaultBalance, monthlyBurnRate]);
+  const maxChartValue = useMemo(
+    () => Math.max(vaultBalance, monthlyBurnRate * 1.5, ...data.map((point) => point.balance)),
+    [data, monthlyBurnRate, vaultBalance],
+  );
 
   return (
     <Card className="relative">
@@ -89,7 +101,7 @@ export function RunwayProjectionChart({ vaultBalance, monthlyBurnRate }: RunwayC
                 fontSize={12}
                 tickLine={false}
                 axisLine={false}
-                tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
+                tickFormatter={(value) => formatAxisValue(value, maxChartValue)}
                 opacity={0.6}
                 dx={-10}
               />
@@ -102,7 +114,9 @@ export function RunwayProjectionChart({ vaultBalance, monthlyBurnRate }: RunwayC
                 fill={data[data.length - 1].balance === 0 ? "url(#criticalGradient)" : "url(#runwayGradient)"}
               />
               {/* Optional Refill Warning Line */}
-              <ReferenceLine y={monthlyBurnRate * 1.5} stroke={EXPAYNSE_RED} strokeDasharray="3 3" opacity={0.5} />
+              {monthlyBurnRate > 0 ? (
+                <ReferenceLine y={monthlyBurnRate * 1.5} stroke={EXPAYNSE_RED} strokeDasharray="3 3" opacity={0.5} />
+              ) : null}
             </AreaChart>
           </ResponsiveContainer>
         </div>

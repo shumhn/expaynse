@@ -124,7 +124,7 @@ export function Footer() {
 
               <div className="flex flex-col sm:flex-row gap-6">
                 <Link
-                  href="/get-started"
+                  href="/dashboard"
                   className="bg-black text-white px-10 py-5 text-lg rounded-full font-bold flex items-center justify-center gap-2 no-underline hover:scale-105 transition-all shadow-xl"
                 >
                   Get Started Now
@@ -170,10 +170,10 @@ export function Footer() {
               <ul className="space-y-3 list-none p-0 m-0">
                 <li>
                   <Link
-                    href="/setup"
+                    href="/treasury"
                     className="text-gray-500 hover:text-black transition-colors text-sm no-underline"
                   >
-                    Setup Treasury
+                    Treasury
                   </Link>
                 </li>
                 <li>
@@ -194,7 +194,7 @@ export function Footer() {
                 </li>
                 <li>
                   <Link
-                    href="/get-started"
+                    href="/dashboard"
                     className="text-gray-500 hover:text-black transition-colors text-sm no-underline"
                   >
                     Dashboard

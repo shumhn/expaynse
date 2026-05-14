@@ -1,7 +1,6 @@
 "use client";
 
 import { useWallet } from "@/hooks/useWallet";
-import { getWalletRole } from "@/lib/storage";
 import {
   Wallet,
   X,
@@ -23,7 +22,7 @@ import { usePathname } from "next/navigation";
 import { ConnectWalletBtn } from "./connect-wallet-btn";
 
 const tabs = [
-  { label: "Deposit", href: "/setup", icon: ShieldCheck },
+  { label: "Treasury", href: "/treasury", icon: ShieldCheck },
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Send", href: "/disburse", icon: Play },
   { label: "Receive", href: "/claim/dashboard", icon: Receipt },
@@ -44,14 +43,8 @@ export default function Appbar() {
 
   const pathname = usePathname();
 
-  const dashboardHref = (() => {
-    if (!wallet.publicKey) return "/get-started";
-    const savedRole = getWalletRole(wallet.publicKey);
-    return savedRole === "employer" ? "/dashboard" : "/get-started";
-  })();
-
   const tabsWithResolvedDashboard = tabs.map((tab) =>
-    tab.label === "Dashboard" ? { ...tab, href: dashboardHref } : tab,
+    tab.label === "Dashboard" ? { ...tab, href: "/dashboard" } : tab,
   );
 
   return (

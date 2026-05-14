@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { MongoClient, Db, Collection } from "mongodb";
 import type { CheckpointCrankStatus } from "@/lib/checkpoint-sync";
+import { normalizePayrollMode, type PayrollMode } from "@/lib/payroll-mode";
 
 export type PayrollStreamStatus = "active" | "paused" | "stopped";
 export type PayrollPayoutMode = "base" | "ephemeral";
@@ -22,6 +23,7 @@ export interface EmployeeRecord {
   employerWallet: string;
   wallet: string;
   name: string;
+  payrollMode?: PayrollMode;
   notes?: string;
   department?: string;
   role?: string;
@@ -194,6 +196,7 @@ export interface CreateEmployeeInput {
   employerWallet: string;
   wallet: string;
   name: string;
+  payrollMode?: PayrollMode;
   notes?: string;
   department?: string;
   role?: string;
@@ -528,6 +531,7 @@ export async function createEmployee(input: CreateEmployeeInput) {
     employerWallet,
     wallet: employeeWallet,
     name,
+    payrollMode: normalizePayrollMode(input.payrollMode),
     notes: input.notes?.trim() || undefined,
     department,
     role,
@@ -577,6 +581,36 @@ export async function getEmployeeById(
     employerWallet: wallet,
     id: employeeId,
   });
+}
+
+export async function updateEmployee(
+  employerWallet: string,
+  employeeId: string,
+  updates: Partial<EmployeeRecord>
+) {
+  const wallet = assertWallet(employerWallet, "Employer wallet");
+  const collection = await employeesCollection();
+
+  const timestamp = nowIso();
+  
+  const { id, employerWallet: _ew, wallet: _w, createdAt, updatedAt, ...allowedUpdates } = updates;
+
+  const result = await collection.findOneAndUpdate(
+    { employerWallet: wallet, id: employeeId },
+    {
+      $set: {
+        ...allowedUpdates,
+        updatedAt: timestamp,
+      },
+    },
+    { returnDocument: "after" }
+  );
+
+  if (!result) {
+    throw new Error("Employee not found");
+  }
+
+  return result;
 }
 
 export async function deleteEmployeeById(

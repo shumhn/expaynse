@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useSyncExternalStore } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   X,
@@ -10,8 +10,13 @@ import {
   Sparkles,
 } from 'lucide-react';
 
-const GUIDE_STORAGE_KEY = 'expaynse-guide-completed';
-const GUIDE_STEP_KEY = 'expaynse-guide-step';
+const DEFAULT_GUIDE_STORAGE_PREFIX = 'expaynse-guide';
+const GUIDE_STORAGE_EVENT = 'expaynse-guide-storage-change';
+
+function notifyGuideStorageChange(key: string) {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(GUIDE_STORAGE_EVENT, { detail: key }));
+}
 
 export interface GuideStep {
   id: string;
@@ -26,10 +31,27 @@ interface InteractiveGuideProps {
   isOpen: boolean;
   onClose: () => void;
   onComplete: () => void;
+  storageKeyPrefix?: string;
+  persistCompletion?: boolean;
 }
 
-export function InteractiveGuide({ steps, isOpen, onClose, onComplete }: InteractiveGuideProps) {
-  const [currentStep, setCurrentStep] = useState(0);
+export function InteractiveGuide({
+  steps,
+  isOpen,
+  onClose,
+  onComplete,
+  storageKeyPrefix = DEFAULT_GUIDE_STORAGE_PREFIX,
+  persistCompletion = true,
+}: InteractiveGuideProps) {
+  const completionKey = `${storageKeyPrefix}-completed`;
+  const stepKey = `${storageKeyPrefix}-step`;
+  const [currentStep, setCurrentStep] = useState(() => {
+    if (typeof window === 'undefined') return 0;
+    const savedStep = window.localStorage.getItem(stepKey);
+    if (!savedStep) return 0;
+    const parsed = parseInt(savedStep, 10);
+    return Number.isNaN(parsed) || parsed < 0 ? 0 : parsed;
+  });
   const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
   const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
 
@@ -76,26 +98,17 @@ export function InteractiveGuide({ steps, isOpen, onClose, onComplete }: Interac
 
   useEffect(() => {
     if (isOpen) {
-      updateTargetPosition();
+      const frame = window.requestAnimationFrame(updateTargetPosition);
       window.addEventListener('resize', updateTargetPosition);
       window.addEventListener('scroll', updateTargetPosition);
-      localStorage.setItem(GUIDE_STEP_KEY, currentStep.toString());
+      localStorage.setItem(stepKey, currentStep.toString());
       return () => {
+        window.cancelAnimationFrame(frame);
         window.removeEventListener('resize', updateTargetPosition);
         window.removeEventListener('scroll', updateTargetPosition);
       };
     }
-  }, [isOpen, currentStep, updateTargetPosition]);
-
-  useEffect(() => {
-    const savedStep = localStorage.getItem(GUIDE_STEP_KEY);
-    if (savedStep) {
-      const parsed = parseInt(savedStep, 10);
-      if (!isNaN(parsed) && parsed < steps.length) {
-        setCurrentStep(parsed);
-      }
-    }
-  }, [steps.length]);
+  }, [isOpen, currentStep, stepKey, updateTargetPosition]);
 
   const handleNext = () => {
     if (currentStep < steps.length - 1) {
@@ -112,14 +125,27 @@ export function InteractiveGuide({ steps, isOpen, onClose, onComplete }: Interac
   };
 
   const handleComplete = () => {
-    localStorage.setItem(GUIDE_STORAGE_KEY, 'true');
-    localStorage.removeItem(GUIDE_STEP_KEY);
+    if (persistCompletion) {
+      localStorage.setItem(completionKey, 'true');
+    }
+    localStorage.removeItem(stepKey);
+    setCurrentStep(0);
+    if (persistCompletion) {
+      notifyGuideStorageChange(completionKey);
+    }
     onComplete();
+    onClose();
   };
 
   const handleSkip = () => {
-    localStorage.setItem(GUIDE_STORAGE_KEY, 'true');
-    localStorage.removeItem(GUIDE_STEP_KEY);
+    if (persistCompletion) {
+      localStorage.setItem(completionKey, 'true');
+    }
+    localStorage.removeItem(stepKey);
+    setCurrentStep(0);
+    if (persistCompletion) {
+      notifyGuideStorageChange(completionKey);
+    }
     onClose();
   };
 
@@ -128,43 +154,71 @@ export function InteractiveGuide({ steps, isOpen, onClose, onComplete }: Interac
   return (
     <AnimatePresence>
       <motion.div
+        key={`overlay-${step.id}`}
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-100"
-      >
-        {/* Dark overlay with spotlight */}
-        <div className="absolute inset-0 bg-black/60" />
+        transition={{ duration: 0.12, ease: 'easeOut' }}
+        className="fixed inset-0 z-[100]"
+        style={{
+          background: targetRect
+            ? `radial-gradient(circle at ${targetRect.left + targetRect.width / 2}px ${
+                targetRect.top + targetRect.height / 2
+              }px, transparent ${Math.max(targetRect.width, targetRect.height) / 2 + 20}px, rgba(0,0,0,0.72) ${
+                Math.max(targetRect.width, targetRect.height) / 2 + 64
+              }px)`
+            : 'rgba(0,0,0,0.72)',
+        }}
+        onClick={handleSkip}
+      />
 
-        {/* Spotlight around target */}
-        {targetRect && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="absolute pointer-events-none"
-            style={{
-              left: targetRect.left - 8,
-              top: targetRect.top - 8,
-              width: targetRect.width + 16,
-              height: targetRect.height + 16,
-              boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.6)',
-              borderRadius: '12px',
-            }}
-          />
-        )}
-
-        {/* Tooltip */}
+      {targetRect && (
         <motion.div
-          initial={{ opacity: 0, scale: 0.9, y: 10 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.9, y: 10 }}
-          transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-          className="absolute z-101 w-80 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden"
+          key={`ring-${step.id}`}
+          initial={{ opacity: 0, scale: 0.88 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.88 }}
+          transition={{ duration: 0.14, ease: 'easeOut' }}
+          className="fixed z-[101] pointer-events-none"
           style={{
-            left: tooltipPosition.x,
-            top: tooltipPosition.y,
+            left: targetRect.left - 8,
+            top: targetRect.top - 8,
+            width: targetRect.width + 16,
+            height: targetRect.height + 16,
+            borderRadius: 14,
+            border: '2px solid rgba(30, 186, 152, 0.95)',
+            boxShadow:
+              '0 0 0 4px rgba(30, 186, 152, 0.16), 0 0 24px rgba(30, 186, 152, 0.24)',
           }}
         >
+          <motion.div
+            animate={{
+              scale: [1, 1.04, 1],
+              opacity: [0.5, 0.15, 0.5],
+            }}
+            transition={{
+              duration: 2,
+              repeat: Infinity,
+              ease: 'easeInOut',
+            }}
+            className="absolute inset-0 rounded-[12px] border-2 border-[#1eba98]"
+          />
+        </motion.div>
+      )}
+
+      <motion.div
+        key={`tooltip-${step.id}`}
+        initial={{ opacity: 0, scale: 0.9, y: 10 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.9, y: 10 }}
+        transition={{ type: 'spring', damping: 28, stiffness: 420, mass: 0.7 }}
+        className="fixed z-[102] w-80 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden"
+        style={{
+          left: tooltipPosition.x,
+          top: tooltipPosition.y,
+        }}
+        onClick={(event) => event.stopPropagation()}
+      >
           {/* Header */}
           <div className="flex items-center justify-between px-5 pt-5 pb-3">
             <div className="flex items-center gap-2">
@@ -238,23 +292,50 @@ export function InteractiveGuide({ steps, isOpen, onClose, onComplete }: Interac
             </div>
           </div>
         </motion.div>
-      </motion.div>
     </AnimatePresence>
   );
 }
 
-export function useGuideStatus() {
-  const [hasCompleted, setHasCompleted] = useState(true);
+export function useGuideStatus(storageKeyPrefix = DEFAULT_GUIDE_STORAGE_PREFIX) {
+  const completionKey = `${storageKeyPrefix}-completed`;
+  const stepKey = `${storageKeyPrefix}-step`;
+  const hasCompleted = useSyncExternalStore(
+    (onStoreChange) => {
+      if (typeof window === 'undefined') {
+        return () => {};
+      }
 
-  useEffect(() => {
-    const completed = localStorage.getItem(GUIDE_STORAGE_KEY);
-    setHasCompleted(!!completed);
-  }, []);
+      const onStorage = (event: StorageEvent) => {
+        if (!event.key || event.key === completionKey) {
+          onStoreChange();
+        }
+      };
+
+      const onGuideStorage = (event: Event) => {
+        const customEvent = event as CustomEvent<string>;
+        if (!customEvent.detail || customEvent.detail === completionKey) {
+          onStoreChange();
+        }
+      };
+
+      window.addEventListener('storage', onStorage);
+      window.addEventListener(GUIDE_STORAGE_EVENT, onGuideStorage as EventListener);
+      return () => {
+        window.removeEventListener('storage', onStorage);
+        window.removeEventListener(GUIDE_STORAGE_EVENT, onGuideStorage as EventListener);
+      };
+    },
+    () => {
+      if (typeof window === 'undefined') return false;
+      return !!window.localStorage.getItem(completionKey);
+    },
+    () => false,
+  );
 
   const resetGuide = () => {
-    localStorage.removeItem(GUIDE_STORAGE_KEY);
-    localStorage.removeItem(GUIDE_STEP_KEY);
-    setHasCompleted(false);
+    localStorage.removeItem(completionKey);
+    localStorage.removeItem(stepKey);
+    notifyGuideStorageChange(completionKey);
   };
 
   return { hasCompleted, resetGuide };

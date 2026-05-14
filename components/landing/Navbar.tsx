@@ -13,8 +13,7 @@ export function Navbar() {
     const wallet = useWallet();
 
     const appLinks = [
-        { label: "Dashboard", href: "/dashboard" },
-        { label: "Setup", href: "/setup" },
+        { label: "Launch App", href: "/dashboard" },
         { label: "Claim", href: "/claim" },
     ];
 
@@ -54,7 +53,7 @@ export function Navbar() {
                     ) : (
                         <div className="hidden sm:flex items-center gap-3 relative">
                             <Link
-                                href="/get-started"
+                                href="/dashboard"
                                 className="flex items-center gap-2 px-5 py-2 rounded-full border border-kast-teal/30 bg-kast-teal/10 text-sm font-medium text-kast-teal hover:bg-kast-teal/20 transition-all duration-300 group"
                             >
                                 Launch App
@@ -140,7 +139,7 @@ export function Navbar() {
                             ) : (
                                 <div className="flex flex-col gap-3">
                                     <Link
-                                        href="/get-started"
+                                        href="/dashboard"
                                         onClick={() => setIsMobileMenuOpen(false)}
                                         className="w-full flex items-center justify-center gap-2 py-4 rounded-xl bg-kast-teal text-black font-bold"
                                     >

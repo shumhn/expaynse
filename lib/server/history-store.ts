@@ -26,8 +26,11 @@ export interface PayrollRun {
   id: string;
   date: string;
   wallet: string;
+  mode?: "streaming" | "private_payroll";
   totalAmount: number;
   employeeCount: number;
+  employeeIds?: string[];
+  employeeNames?: string[];
   recipientAddresses: string[];
   depositSig?: string;
   transferSig?: string;

@@ -18,6 +18,7 @@ import {
   getStatusMeta,
   getLiveStateCopy,
   microToUsdc,
+  computeLiveClaimableAmountMicro,
 } from "@/components/claim/claim-utils";
 
 export default function ClaimDashboardPage() {
@@ -33,6 +34,7 @@ export default function ClaimDashboardPage() {
     fetchPrivateBalance,
     privateAccountInitialized,
     registeredEmployeeWallet,
+    liveNowMs,
   } = useClaimData();
 
   const cycleInfo = useMemo(() => getCurrentCycleSnapshot(), []);
@@ -46,25 +48,40 @@ export default function ClaimDashboardPage() {
   }, [publicKey, fetchPrivateInitStatus, fetchPrivateBalance, fetchEmployeePayrollSummary]);
 
   const primaryPayrollStream = payrollSummary?.streams?.[0];
-  const statusMeta = primaryPayrollStream ? getStatusMeta(primaryPayrollStream.stream.status) : null;
+  const hasPrivatePayrollMode =
+    payrollSummary?.employees?.some(
+      (employee) => employee.payrollMode === "private_payroll",
+    ) ?? false;
+  const canonicalSnapshot = primaryPayrollStream?.snapshot ?? null;
+  const runtimeStatus = canonicalSnapshot?.status ?? primaryPayrollStream?.stream.status ?? null;
+  const statusMeta = runtimeStatus ? getStatusMeta(runtimeStatus) : null;
   const StatusIcon = statusMeta?.icon;
-  const hasLivePreview = Boolean(primaryPayrollStream?.preview && primaryPayrollStream?.liveState?.ready);
+  const hasLiveSnapshot = Boolean(canonicalSnapshot && primaryPayrollStream?.liveState?.ready);
+  const correctionPollMs = hasLiveSnapshot ? 4000 : 8000;
   useEffect(() => {
     if (!publicKey) return;
     const poll = setInterval(() => {
       void fetchPrivateBalance({ silent: true });
       void fetchEmployeePayrollSummary({ silent: true, interactive: false });
-    }, hasLivePreview ? 1000 : 5000);
+    }, correctionPollMs);
     return () => clearInterval(poll);
-  }, [publicKey, fetchPrivateBalance, fetchEmployeePayrollSummary, hasLivePreview]);
+  }, [
+    publicKey,
+    fetchPrivateBalance,
+    fetchEmployeePayrollSummary,
+    correctionPollMs,
+  ]);
 
   const exactClaimableAmountMicro =
-    hasLivePreview && primaryPayrollStream?.preview
-      ? primaryPayrollStream.preview.effectiveClaimableAmountMicro
+    hasLiveSnapshot && canonicalSnapshot
+      ? computeLiveClaimableAmountMicro({
+          snapshot: canonicalSnapshot,
+          nowMs: liveNowMs,
+        })
       : null;
-  const monthlySalaryAmount = primaryPayrollStream?.preview?.monthlyCapUsd ?? null;
-  const claimableNowAmount = hasLivePreview ? microToUsdc(exactClaimableAmountMicro) : null;
-  const paidThisCycleAmount = hasLivePreview ? microToUsdc(primaryPayrollStream?.preview?.paidThisCycleMicro) : null;
+  const monthlySalaryAmount = canonicalSnapshot?.monthlyCapUsd ?? null;
+  const claimableNowAmount = hasLiveSnapshot ? microToUsdc(exactClaimableAmountMicro) : null;
+  const paidThisCycleAmount = hasLiveSnapshot ? microToUsdc(canonicalSnapshot?.paidThisCycleMicro) : null;
   const earnedThisMonthAmount =
     claimableNowAmount !== null && paidThisCycleAmount !== null
       ? paidThisCycleAmount + claimableNowAmount
@@ -73,16 +90,16 @@ export default function ClaimDashboardPage() {
     earnedThisMonthAmount !== null && monthlySalaryAmount !== null
       ? Math.max(0, monthlySalaryAmount - earnedThisMonthAmount)
       : null;
-  const claimedThisMonthAmount = hasLivePreview && primaryPayrollStream ? primaryPayrollStream.stream.totalPaid : null;
+  const claimedThisMonthAmount = hasLiveSnapshot && primaryPayrollStream ? primaryPayrollStream.stream.totalPaid : null;
 
   const employmentStatusLabel = !primaryPayrollStream
     ? "No stream"
-    : hasLivePreview
-      ? primaryPayrollStream.stream.status === "active"
+    : hasLiveSnapshot
+      ? runtimeStatus === "active"
         ? "Full Time"
         : "On Hold"
       : "Awaiting PER sync";
-  const nextReleaseLabel = hasLivePreview
+  const nextReleaseLabel = hasLiveSnapshot
     ? "Auto-accruing in real-time"
     : "Sign + refresh to load live PER state";
   const privateBalanceAmount = Number.parseFloat(privBalance ?? "0");
@@ -92,7 +109,7 @@ export default function ClaimDashboardPage() {
       ? "needs_private_init"
       : privateBalanceAmount > 0
         ? "balance_available"
-        : hasLivePreview
+        : hasLiveSnapshot
           ? "ready_to_claim"
           : "waiting_for_employer";
 
@@ -113,17 +130,25 @@ export default function ClaimDashboardPage() {
     },
     waiting_for_employer: {
       eyebrow: "Step 3",
-      title: "Waiting for payroll activation",
-      body: "Your private account is ready. Your employer still needs to finish payroll setup before new salary becomes claimable.",
+      title: hasPrivatePayrollMode
+        ? "Waiting for your next private payroll payout"
+        : "Waiting for payroll activation",
+      body: hasPrivatePayrollMode
+        ? "Your private account is ready. Your employer can now send salary privately, and it will appear in your private balance when paid."
+        : "Your private account is ready. Your employer still needs to finish payroll setup before new salary becomes claimable.",
       ctaHref: "/claim/balances",
       ctaLabel: "Check Payroll Status",
     },
     ready_to_claim: {
       eyebrow: "Step 4",
-      title: "Salary is ready to claim",
-      body: "Your payroll stream is live. Claim any available salary into your private balance, then withdraw whenever you want.",
+      title: hasPrivatePayrollMode
+        ? "Private salary is available"
+        : "Salary is ready to claim",
+      body: hasPrivatePayrollMode
+        ? "Your employer has sent private payroll. Review your private balance and withdraw whenever you want."
+        : "Your payroll stream is live. Claim any available salary into your private balance, then withdraw whenever you want.",
       ctaHref: "/claim/withdraw",
-      ctaLabel: "Claim Salary",
+      ctaLabel: hasPrivatePayrollMode ? "Open Withdraw" : "Claim Salary",
     },
     balance_available: {
       eyebrow: "Step 5",
@@ -141,7 +166,9 @@ export default function ClaimDashboardPage() {
           <div>
             <h1 className="font-heading text-4xl font-bold tracking-tight text-white">My Payroll</h1>
             <p className="mt-2 max-w-lg text-sm leading-relaxed text-[#a8a8aa]">
-              Real-time dashboard for your private salary accrual and stream health.
+              {hasPrivatePayrollMode
+                ? "MagicBlock PER handles your private payroll balance and private payouts. Withdraw whenever your employer sends salary privately."
+                : "Base Solana handles funding and exits. MagicBlock PER handles your live private salary accrual and claimable state."}
             </p>
           </div>
           <div className="flex w-fit rounded-2xl border border-white/10 bg-white/5 p-1 backdrop-blur-xl">
@@ -176,7 +203,11 @@ export default function ClaimDashboardPage() {
                 {primaryPayrollStream ? primaryPayrollStream.employee.name : "Your private payroll"}
               </h2>
               <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[#a8a8aa]">
-                {primaryPayrollStream && statusMeta ? statusMeta.copy : "See whether your payroll is live, how much has accrued privately, and what is already available in your vault."}
+                {primaryPayrollStream && statusMeta
+                  ? statusMeta.copy
+                  : hasPrivatePayrollMode
+                    ? "Track private payroll payouts, see what is already in your private balance, and withdraw when you are ready."
+                    : "See whether your payroll is live, how much has accrued privately, and what is already available in your vault."}
               </p>
 
 	              <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
@@ -185,7 +216,7 @@ export default function ClaimDashboardPage() {
                   MagicBlock Payments {magicBlockHealth === "ok" ? "Online" : magicBlockHealth === "error" ? "Degraded" : "Checking"}
                 </span>
               </div>
-	              {primaryPayrollStream && hasLivePreview ? (
+	              {primaryPayrollStream && hasLiveSnapshot ? (
                 <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-[#1eba98]/25 bg-[#1eba98]/10 px-3 py-1.5">
                   <span className="text-[9px] font-bold uppercase tracking-[0.15em] text-[#84f7dc]">
                     Live PER Synced
@@ -257,7 +288,7 @@ export default function ClaimDashboardPage() {
                   <p className="mt-1.5 text-[10px] text-[#a8a8aa]">
                     {remainingThisMonthAmount !== null
                       ? `Remaining: $${formatUsdc(remainingThisMonthAmount, 2)}`
-                      : "Requires signed PER preview"}
+                      : "Requires signed PER snapshot"}
                   </p>
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-6">
@@ -285,9 +316,13 @@ export default function ClaimDashboardPage() {
             </>
           ) : !loadingPayrollSummary && (
             <div className="mt-12 rounded-[2rem] border border-dashed border-white/20 bg-white/[0.02] p-12 text-center">
-              <p className="text-xl font-bold tracking-tight text-white">No payroll stream found.</p>
+              <p className="text-xl font-bold tracking-tight text-white">
+                {hasPrivatePayrollMode ? "No live stream needed." : "No payroll stream found."}
+              </p>
               <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-[#8f8f95]">
-                Connect a wallet registered with Expaynse to see your live payroll dashboard.
+                {hasPrivatePayrollMode
+                  ? "This employer uses private payroll payouts instead of realtime streaming. Watch your private balance for the next payout."
+                  : "Connect a wallet registered with Expaynse to see your live payroll dashboard."}
               </p>
             </div>
           )}

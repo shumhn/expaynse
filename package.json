@@ -12,6 +12,10 @@
     "test:cashout:payout-mode": "node --env-file=.env --loader ./tests/alias-loader.mjs tests/cashout-payout-mode-e2e.ts",
     "test:employee:init-reuse": "node --env-file=.env --loader ./tests/alias-loader.mjs tests/employee-init-reuse-smoke.ts",
     "test:checkpoint:logic": "node --loader ./tests/alias-loader.mjs tests/checkpoint-crank-logic.test.ts",
+    "test:swap:logic": "node --loader ./tests/alias-loader.mjs tests/private-swap-config.test.ts",
+    "test:swap:treasury": "node --loader ./tests/alias-loader.mjs tests/treasury-swap-flow.e2e.ts",
+    "test:swap:treasury:live": "node --env-file=.env.local tests/treasury-swap-live.e2e.ts",
+    "test:swap:quote-probe": "node --env-file=.env.local tests/treasury-swap-quote-probe.e2e.ts",
     "test:checkpoint:regression": "node --env-file=.env --loader ./tests/alias-loader.mjs tests/checkpoint-crank-regression.e2e.ts",
     "test:magicblock:e2e": "node tests/magicblock-api-e2e.ts",
     "test:app:self-custody": "node --env-file=.env --loader ./tests/alias-loader.mjs tests/app-self-custodial-e2e.ts",
@@ -66,6 +70,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.2",
+    "pptxgenjs": "^4.0.1",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

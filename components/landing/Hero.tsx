@@ -8,17 +8,29 @@ export function Hero() {
     return (
         <section className="relative min-h-screen flex items-center pt-24 md:pt-32 px-6 lg:px-12 overflow-hidden bg-black selection:bg-kast-teal/30">
             <div className="absolute top-1/2 right-0 -translate-y-1/2 w-[800px] h-[800px] bg-kast-teal/10 rounded-full blur-[120px] pointer-events-none" />
-            <div className="max-w-7xl grid lg:grid-cols-2 gap-16 items-center w-full">
+            
+            <motion.div
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 1, ease: [0.16, 1, 0.3, 1] }}
+                className="absolute top-24 md:top-32 left-1/2 -translate-x-1/2 flex items-center justify-center gap-4 flex-wrap w-full px-6 z-20"
+            >
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10 backdrop-blur-md">
+                    <Image src="/magicblock-logo.png" alt="MagicBlock" width={16} height={16} className="rounded-sm" />
+                    <span className="text-sm text-zinc-300 font-medium">Powered by MagicBlock</span>
+                </div>
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-kast-teal/10 border border-kast-teal/20 backdrop-blur-md">
+                    <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-kast-teal opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-kast-teal"></span>
+                    </span>
+                    <span className="text-sm text-kast-teal font-medium tracking-wide">Live on Devnet</span>
+                </div>
+            </motion.div>
+
+            <div className="max-w-7xl grid lg:grid-cols-2 gap-16 items-center w-full mt-16 md:mt-24">
                 <div className="flex flex-col gap-6 z-10">
-                    <motion.span
-                        initial={{ opacity: 0, x: -20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ duration: 1, ease: [0.16, 1, 0.3, 1] }}
-                        style={{ willChange: "transform, opacity" }}
-                        className="text-kast-teal text-sm font-semibold tracking-wide"
-                    >
-                        Payroll
-                    </motion.span>
+
                     <motion.h1
                         initial={{ opacity: 0, y: 20 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -47,10 +59,11 @@ export function Hero() {
                         transition={{ delay: 0.6, duration: 1, ease: [0.16, 1, 0.3, 1] }}
                         style={{ willChange: "transform, opacity" }}
                     >
-                        <Link href="/get-started" className="inline-flex px-8 py-3 bg-kast-teal text-black font-bold rounded-full hover:scale-105 transition-transform border-2 border-kast-teal hover:bg-transparent hover:text-kast-teal">
+                        <Link href="/dashboard" className="inline-flex px-8 py-3 bg-kast-teal text-black font-bold rounded-full hover:scale-105 transition-transform border-2 border-kast-teal hover:bg-transparent hover:text-kast-teal">
                             Launch App
                         </Link>
                     </motion.div>
+
                 </div>
                 <motion.div
                     initial={{ opacity: 0, x: 40 }}

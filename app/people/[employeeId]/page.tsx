@@ -14,6 +14,7 @@ import {
 import { toast } from "sonner";
 
 import { EmployerLayout } from "@/components/employer-layout";
+import { computeLiveClaimableAmountMicro } from "@/components/claim/claim-utils";
 import { walletAuthenticatedFetch } from "@/lib/client/wallet-auth-fetch";
 import { getOrCreateCachedTeeToken, loadCachedTeeToken } from "@/lib/client/tee-auth-cache";
 import { fetchTeeAuthToken, isJwtExpired } from "@/lib/magicblock-api";
@@ -82,12 +83,22 @@ interface StatementRow {
   };
 }
 
-interface PreviewResponse {
-  preview: {
-    claimableAmountMicro: string;
-    effectiveClaimableAmountMicro: string;
-  };
+interface EmployeePayrollSummaryResponse {
+  streams: Array<{
+    stream: {
+      id: string;
+    };
+    snapshot: ClaimSnapshot | null;
+  }>;
 }
+
+type ClaimSnapshot = {
+  teeObservedAt: string;
+  status: "active" | "paused" | "stopped";
+  ratePerSecondMicro: string;
+  effectiveClaimableAmountMicro: string;
+  capReached: boolean;
+};
 
 function formatCurrency(amount: number) {
   return new Intl.NumberFormat("en-US", {
@@ -158,6 +169,7 @@ export default function EmployeeStatementPage() {
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [stream, setStream] = useState<StreamInfo | null>(null);
   const [statements, setStatements] = useState<StatementRow[]>([]);
+  const [claimSnapshot, setClaimSnapshot] = useState<ClaimSnapshot | null>(null);
   const [claimableNow, setClaimableNow] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -219,7 +231,8 @@ export default function EmployeeStatementPage() {
           setStatements((statementJson.statements ?? []) as StatementRow[]);
         }
 
-        if (!nextStream || !publicKey) {
+        if (!nextEmployee || !nextStream || !publicKey) {
+          setClaimSnapshot(null);
           setClaimableNow(null);
           return;
         }
@@ -236,8 +249,8 @@ export default function EmployeeStatementPage() {
             ));
         }
 
-        const previewRes = await fetch(
-          `/api/payroll/preview?employerWallet=${walletAddr}&streamId=${nextStream.id}`,
+        const summaryRes = await fetch(
+          `/api/payroll/employee?employeeWallet=${nextEmployee.wallet}`,
           {
             headers: {
               Authorization: `Bearer ${tokenCache.current}`,
@@ -245,15 +258,16 @@ export default function EmployeeStatementPage() {
           },
         );
 
-        if (!previewRes.ok) {
+        if (!summaryRes.ok) {
+          setClaimSnapshot(null);
           setClaimableNow(null);
           return;
         }
 
-        const previewJson = (await previewRes.json()) as PreviewResponse;
-        setClaimableNow(
-          Number(previewJson.preview.effectiveClaimableAmountMicro) / 1_000_000,
-        );
+        const summaryJson = (await summaryRes.json()) as EmployeePayrollSummaryResponse;
+        const matchingStream =
+          summaryJson.streams.find((entry) => entry.stream.id === nextStream.id) ?? null;
+        setClaimSnapshot(matchingStream?.snapshot ?? null);
       } catch (error: unknown) {
         toast.error(
           error instanceof Error
@@ -267,6 +281,21 @@ export default function EmployeeStatementPage() {
 
     void load();
   }, [employeeId, publicKey, signMessage, walletAddr]);
+
+  useEffect(() => {
+    if (!claimSnapshot) {
+      setClaimableNow(null);
+      return;
+    }
+
+    const claimableMicro = computeLiveClaimableAmountMicro({
+      snapshot: claimSnapshot,
+      nowMs,
+    });
+    setClaimableNow(
+      claimableMicro !== null ? Number(claimableMicro) / 1_000_000 : null,
+    );
+  }, [claimSnapshot, nowMs]);
 
   const monthlySalary =
     employee?.monthlySalaryUsd ??

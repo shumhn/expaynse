@@ -17,6 +17,7 @@ import {
   Wallet,
   BarChart2,
   Shield,
+  Play,
 } from "lucide-react";
 import { toast } from "sonner";
 import { EmployerLayout } from "@/components/employer-layout";
@@ -25,7 +26,10 @@ import {
   getOrCreateCachedTeeToken,
   loadCachedTeeToken,
 } from "@/lib/client/tee-auth-cache";
-import { fetchTeeAuthToken, isJwtExpired } from "@/lib/magicblock-api";
+import {
+  fetchTeeAuthToken,
+  isJwtExpired,
+} from "@/lib/magicblock-api";
 import {
   monthlyUsdToRatePerSecond,
 } from "@/lib/payroll-math";
@@ -36,12 +40,25 @@ import {
   payoutModeSummary,
   type PayrollPayoutMode,
 } from "@/lib/payroll-payout-mode";
+import {
+  PAYROLL_MODE_OPTIONS,
+  payrollModeLabel,
+  type PayrollMode,
+} from "@/lib/payroll-mode";
 import Link from "next/link";
+import {
+  InteractiveGuide,
+  type GuideStep,
+  useGuideStatus,
+} from "@/components/ui/interactive-guide";
+
+const PEOPLE_ONBOARDING_HANDOFF_KEY = "expaynse:people-onboarding-handoff";
 
 interface Employee {
   id: string;
   wallet: string;
   name: string;
+  payrollMode?: PayrollMode;
   notes?: string;
   department?: string;
   role?: string;
@@ -93,7 +110,11 @@ interface PrivatePayrollStateResponse {
   };
   state: {
     status: "active" | "paused" | "stopped";
+    teeObservedAt?: string;
+    ratePerSecondMicro?: string;
     accruedUnpaidMicro: string;
+    rawClaimableAmountMicro: string;
+    pendingAccrualMicro?: string;
     totalPaidPrivateMicro: string;
     effectiveClaimableAmountMicro: string;
     lastAccrualTimestamp: string;
@@ -198,6 +219,34 @@ function getPrivateReadinessState(
 ) {
   const initStatus = getPrivateInitStatus(employee, stream);
 
+  if (employee.payrollMode === "private_payroll") {
+    if (initStatus === "failed") {
+      return {
+        label: "Init failed",
+        className: "bg-rose-500/15 text-rose-300 border-rose-400/30",
+      };
+    }
+
+    if (initStatus === "processing") {
+      return {
+        label: "Init syncing",
+        className: "bg-blue-500/15 text-blue-300 border-blue-400/30",
+      };
+    }
+
+    if (initStatus !== "confirmed") {
+      return {
+        label: "Init pending",
+        className: "bg-amber-500/15 text-amber-300 border-amber-400/30",
+      };
+    }
+
+    return {
+      label: "Private Ready",
+      className: "bg-emerald-500/15 text-emerald-300 border-emerald-400/30",
+    };
+  }
+
   if (hasMissingPrivateState) {
     return {
       label: "Expired",
@@ -281,6 +330,49 @@ const ROLE_OPTIONS_BY_DEPARTMENT: Record<string, string[]> = {
 
 const PER_PREVIEW_MAX_STALENESS_MS = 15_000;
 
+const PAYROLL_MODE_GUIDE_STEPS: GuideStep[] = [
+  {
+    id: "mode-picker",
+    target: '[data-guide="payroll-mode-picker"]',
+    title: "Choose the payroll mode",
+    description: "Start here. Pick whether this employee should receive instant private payroll or live real-time streaming.",
+    position: "right",
+  },
+  {
+    id: "private-payroll",
+    target: '[data-guide="mode-private-payroll"]',
+    title: "Instant private payroll",
+    description: "Use this when you want private salary payouts without running a live stream.",
+    position: "right",
+  },
+  {
+    id: "streaming-payroll",
+    target: '[data-guide="mode-streaming"]',
+    title: "Real-time streaming",
+    description: "Use this when salary should accrue every second and the employee can access pay continuously.",
+    position: "right",
+  },
+  {
+    id: "salary-input",
+    target: '[data-guide="salary-input"]',
+    title: "Set the monthly salary",
+    description: "Enter the employee's monthly amount here. We compute the live per-second rate automatically for streaming mode.",
+    position: "left",
+  },
+  {
+    id: "create-employee",
+    target: '[data-guide="create-employee"]',
+    title: "Create the employee flow",
+    description: "Finish here. Once the employee is added, the selected payroll mode takes over the rest of the onboarding path.",
+    position: "top",
+  },
+];
+
+const PAYROLL_MODE_CTA_LABEL: Record<PayrollMode, string> = {
+  private_payroll: "Add Employee",
+  streaming: "Add Employee & Start Stream",
+};
+
 export default function PeoplePage() {
   const { publicKey, signMessage } = useWallet();
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -299,6 +391,7 @@ export default function PeoplePage() {
     ROLE_OPTIONS_BY_DEPARTMENT[DEPARTMENT_OPTIONS[0]][0] ?? "",
   );
   const [newCompensationAmount, setNewCompensationAmount] = useState("");
+  const [newPayrollMode, setNewPayrollMode] = useState<PayrollMode>("streaming");
   const [newPayoutMode, setNewPayoutMode] = useState<PayrollPayoutMode>(
     DEFAULT_PAYROLL_PAYOUT_MODE,
   );
@@ -309,12 +402,46 @@ export default function PeoplePage() {
   const [missingPrivateStates, setMissingPrivateStates] = useState<
     Record<string, boolean>
   >({});
+  const [initializingWallets, setInitializingWallets] = useState<string[]>([]);
   const tokenCache = useRef<string | null>(null);
+  const autoInitAttemptedWallets = useRef<Set<string>>(new Set());
+  const [isPayrollGuideOpen, setIsPayrollGuideOpen] = useState(false);
+  const [hasShownPayrollGuide, setHasShownPayrollGuide] = useState(false);
+  const { hasCompleted: hasCompletedPayrollGuide } = useGuideStatus("payroll-modes");
+  const [streamModalEmployee, setStreamModalEmployee] = useState<Employee | null>(null);
+  const [streamSalaryInput, setStreamSalaryInput] = useState("");
+  const [startingStream, setStartingStream] = useState(false);
 
   // Live ticker: update every second for real-time accruing display
   useEffect(() => {
     const interval = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!showAdd || hasCompletedPayrollGuide || hasShownPayrollGuide) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setIsPayrollGuideOpen(true);
+      setHasShownPayrollGuide(true);
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [showAdd, hasCompletedPayrollGuide, hasShownPayrollGuide]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const shouldHandoff = window.sessionStorage.getItem(PEOPLE_ONBOARDING_HANDOFF_KEY);
+    if (!shouldHandoff) return;
+
+    window.sessionStorage.removeItem(PEOPLE_ONBOARDING_HANDOFF_KEY);
+    const frame = window.requestAnimationFrame(() => {
+      setShowAdd(true);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   function isFreshPrivatePreview(
@@ -346,11 +473,12 @@ export default function PeoplePage() {
 
   function getLiveAccrued(preview?: PrivatePayrollStateResponse | null) {
     if (preview) {
-      const accruedUnpaid = Number(preview.state.accruedUnpaidMicro) / 1_000_000;
+      const rawClaimable =
+        Number(preview.state.rawClaimableAmountMicro) / 1_000_000;
       const totalPaidPrivate =
         Number(preview.state.totalPaidPrivateMicro) / 1_000_000;
-      if (Number.isFinite(accruedUnpaid) && Number.isFinite(totalPaidPrivate)) {
-        return Math.max(0, accruedUnpaid + totalPaidPrivate);
+      if (Number.isFinite(rawClaimable) && Number.isFinite(totalPaidPrivate)) {
+        return Math.max(0, rawClaimable + totalPaidPrivate);
       }
     }
     return null;
@@ -659,6 +787,182 @@ export default function PeoplePage() {
   const parsedAmount = Number.parseFloat(newCompensationAmount || "0");
   const startDateTimeIso = new Date().toISOString();
   const previewRatePerSecond = monthlyUsdToRatePerSecond(parsedAmount);
+  const selectedPayrollModeCtaLabel = PAYROLL_MODE_CTA_LABEL[newPayrollMode];
+
+  const initializePrivatePayrollRecipient = useCallback(
+    async (
+      employee: Employee,
+      options?: {
+        showSuccessToast?: boolean;
+        showFailureToast?: boolean;
+      },
+    ) => {
+      if (!walletAddr) {
+        throw new Error("Connect your wallet first");
+      }
+
+      if (!signMessage) {
+        throw new Error("Wallet message signing is required");
+      }
+
+      setInitializingWallets((prev) =>
+        prev.includes(employee.wallet) ? prev : [...prev, employee.wallet],
+      );
+      setEmployees((prev) =>
+        prev.map((row) =>
+          row.wallet === employee.wallet
+            ? {
+                ...row,
+                privateRecipientInitStatus: "processing",
+                privateRecipientInitError: null,
+              }
+            : row,
+        ),
+      );
+
+      try {
+        const autoInitResponse = await walletAuthenticatedFetch({
+          wallet: walletAddr,
+          signMessage,
+          path: "/api/employees/auto-init",
+          method: "POST",
+          body: {
+            employerWallet: walletAddr,
+            employeeWallet: employee.wallet,
+          },
+        });
+
+        const autoInitJson = (await autoInitResponse.json()) as {
+          employee?: Employee;
+          error?: string;
+        };
+
+        if (!autoInitResponse.ok || !autoInitJson.employee) {
+          throw new Error(
+            autoInitJson.error || "Failed to auto-initialize private account",
+          );
+        }
+
+        setEmployees((prev) =>
+          prev.map((row) =>
+            row.id === autoInitJson.employee?.id ? autoInitJson.employee : row,
+          ),
+        );
+
+        if (options?.showSuccessToast !== false) {
+          toast.success("Private payroll account initialized.");
+        }
+
+        return autoInitJson.employee;
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Private payroll initialization failed";
+
+        setEmployees((prev) =>
+          prev.map((row) =>
+            row.wallet === employee.wallet
+              ? {
+                  ...row,
+                  privateRecipientInitStatus: "failed",
+                  privateRecipientInitError: message,
+                }
+              : row,
+          ),
+        );
+
+        if (options?.showFailureToast !== false) {
+          toast.error(message);
+        }
+
+        return null;
+      } finally {
+        setInitializingWallets((prev) =>
+          prev.filter((wallet) => wallet !== employee.wallet),
+        );
+      }
+    },
+    [signMessage, walletAddr],
+  );
+
+  const handleStartStream = async (employee: Employee, monthlySalary: number) => {
+    if (!walletAddr || !signMessage) return;
+
+    setStartingStream(true);
+    try {
+      const ratePerSecond = monthlyUsdToRatePerSecond(monthlySalary);
+          
+      if (ratePerSecond <= 0) {
+        toast.error("Monthly salary must be a positive number.");
+        return;
+      }
+
+      const startDateTimeIso = new Date().toISOString();
+
+      // Update the employee's payroll mode to streaming
+      const empRes = await walletAuthenticatedFetch({
+        wallet: walletAddr,
+        signMessage,
+        path: `/api/employees/${employee.id}`,
+        method: "PATCH",
+        body: {
+          employerWallet: walletAddr,
+          payrollMode: "streaming",
+        },
+      });
+
+      if (!empRes.ok) {
+        const empJson = await empRes.json();
+        throw new Error(empJson.error || "Failed to update employee mode");
+      }
+
+      setEmployees((prev) =>
+        prev.map((e) => (e.id === employee.id ? { ...e, payrollMode: "streaming", monthlySalaryUsd: monthlySalary } : e))
+      );
+
+      // Create the stream
+      const streamRes = await walletAuthenticatedFetch({
+        wallet: walletAddr,
+        signMessage,
+        path: "/api/streams",
+        method: "POST",
+        body: {
+          employerWallet: walletAddr,
+          employeeId: employee.id,
+          ratePerSecond,
+          startsAt: startDateTimeIso,
+          status: "active",
+          payoutMode: DEFAULT_PAYROLL_PAYOUT_MODE,
+          allowedPayoutModes: allowedPayoutModesFor(DEFAULT_PAYROLL_PAYOUT_MODE),
+          compensationSnapshot: {
+            employmentType: employee.employmentType,
+            paySchedule: employee.paySchedule,
+            compensationUnit: "monthly",
+            compensationAmountUsd: monthlySalary,
+            monthlySalaryUsd: monthlySalary,
+            startsAt: startDateTimeIso,
+          },
+        },
+      });
+
+      const streamJson = await streamRes.json();
+      if (!streamRes.ok) {
+        throw new Error(streamJson.error || "Failed to start stream");
+      }
+
+      if (streamJson.stream) {
+        setStreams((prev) => [streamJson.stream, ...prev]);
+        toast.success(`Stream started for ${employee.name} at $${monthlySalary.toFixed(2)}/month`);
+      }
+
+      setStreamModalEmployee(null);
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Failed to start stream");
+    } finally {
+      setStartingStream(false);
+    }
+  };
 
   const handleAdd = async () => {
     if (
@@ -682,6 +986,7 @@ export default function PeoplePage() {
           employerWallet: walletAddr,
           wallet: newWallet.trim(),
           name: newName.trim(),
+          payrollMode: newPayrollMode,
           department: newDepartment.trim(),
           role: newRole.trim() || undefined,
           employmentType: "full_time",
@@ -697,39 +1002,52 @@ export default function PeoplePage() {
         throw new Error(employeeJson.error || "Failed to add employee");
       }
 
-      const employee = employeeJson.employee as Employee;
-      const shouldStartImmediately = new Date(startDateTimeIso).getTime() <= now;
-      const streamRes = await walletAuthenticatedFetch({
-        wallet: walletAddr,
-        signMessage,
-        path: "/api/streams",
-        method: "POST",
-        body: {
-          employerWallet: walletAddr,
-          employeeId: employee.id,
-          ratePerSecond: previewRatePerSecond,
-          startsAt: startDateTimeIso,
-          status: shouldStartImmediately ? "active" : "paused",
-          payoutMode: newPayoutMode,
-          allowedPayoutModes: allowedPayoutModesFor(newPayoutMode),
-          compensationSnapshot: {
-            employmentType: "full_time",
-            paySchedule: "monthly",
-            compensationUnit: "monthly",
-            compensationAmountUsd: parsedAmount,
-            monthlySalaryUsd: parsedAmount,
+      let employee = employeeJson.employee as Employee;
+      if (
+        employee.privateRecipientInitStatus !== "confirmed" &&
+        !!signMessage
+      ) {
+        employee =
+          (await initializePrivatePayrollRecipient(employee, {
+            showSuccessToast: false,
+            showFailureToast: false,
+          })) ?? employee;
+      }
+      if (employee.payrollMode !== "private_payroll") {
+        const shouldStartImmediately = new Date(startDateTimeIso).getTime() <= now;
+        const streamRes = await walletAuthenticatedFetch({
+          wallet: walletAddr,
+          signMessage,
+          path: "/api/streams",
+          method: "POST",
+          body: {
+            employerWallet: walletAddr,
+            employeeId: employee.id,
+            ratePerSecond: previewRatePerSecond,
             startsAt: startDateTimeIso,
+            status: shouldStartImmediately ? "active" : "paused",
+            payoutMode: newPayoutMode,
+            allowedPayoutModes: allowedPayoutModesFor(newPayoutMode),
+            compensationSnapshot: {
+              employmentType: "full_time",
+              paySchedule: "monthly",
+              compensationUnit: "monthly",
+              compensationAmountUsd: parsedAmount,
+              monthlySalaryUsd: parsedAmount,
+              startsAt: startDateTimeIso,
+            },
           },
-        },
-      });
-      const streamJson = await streamRes.json();
+        });
+        const streamJson = await streamRes.json();
+
+        if (streamRes.ok && streamJson.stream) {
+          setStreams((prev) => [streamJson.stream, ...prev]);
+        } else {
+          toast.warning("Employee added, but stream setup needs attention");
+        }
+      }
 
       setEmployees((prev) => [employee, ...prev]);
-      if (streamRes.ok && streamJson.stream) {
-        setStreams((prev) => [streamJson.stream, ...prev]);
-      } else {
-        toast.warning("Employee added, but stream setup needs attention");
-      }
 
       setShowAdd(false);
       setNewName("");
@@ -737,8 +1055,17 @@ export default function PeoplePage() {
       setNewDepartment(DEPARTMENT_OPTIONS[0]);
       setNewRole(ROLE_OPTIONS_BY_DEPARTMENT[DEPARTMENT_OPTIONS[0]][0]);
       setNewCompensationAmount("");
+      setNewPayrollMode("streaming");
       setNewPayoutMode(DEFAULT_PAYROLL_PAYOUT_MODE);
-      if (employee.privateRecipientInitStatus === "confirmed") {
+      if (employee.payrollMode === "private_payroll") {
+        if (employee.privateRecipientInitStatus === "confirmed") {
+          toast.success("Employee added and private payroll is ready.");
+        } else {
+          toast.success(
+            "Employee added in private payroll mode. Private setup can finish from the employer flow if needed.",
+          );
+        }
+      } else if (employee.privateRecipientInitStatus === "confirmed") {
         toast.success("Employee added and private init completed.");
       } else if (employee.privateRecipientInitStatus === "failed") {
         toast.warning(
@@ -757,6 +1084,31 @@ export default function PeoplePage() {
       setAdding(false);
     }
   };
+
+  useEffect(() => {
+    if (!walletAddr || !signMessage) return;
+    if (initializingWallets.length > 0) return;
+
+    const nextAutoInitEmployee = employees.find((employee) => {
+      if (employee.privateRecipientInitStatus === "confirmed") return false;
+      if (autoInitAttemptedWallets.current.has(employee.wallet)) return false;
+      return true;
+    });
+
+    if (!nextAutoInitEmployee) return;
+
+    autoInitAttemptedWallets.current.add(nextAutoInitEmployee.wallet);
+    void initializePrivatePayrollRecipient(nextAutoInitEmployee, {
+      showSuccessToast: false,
+      showFailureToast: false,
+    });
+  }, [
+    employees,
+    initializePrivatePayrollRecipient,
+    initializingWallets.length,
+    signMessage,
+    walletAddr,
+  ]);
 
   return (
     <EmployerLayout>
@@ -865,12 +1217,11 @@ export default function PeoplePage() {
 
           {/* Table Headers */}
           {!loading && filtered.length > 0 && (
-            <div className="grid grid-cols-[1.5fr_1fr_1fr_1.2fr_1fr_1fr_1fr] gap-4 items-center px-6 py-4 border-b border-white/5 bg-white/[0.02]">
+            <div className="grid grid-cols-[1.8fr_0.8fr_0.8fr_1fr_0.8fr_1.8fr] gap-4 items-center px-6 py-4 border-b border-white/5 bg-white/[0.02]">
               <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Employee</div>
               <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Start Date</div>
               <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Salary</div>
               <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Accrued Live</div>
-              <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Privacy</div>
               <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Status</div>
               <div className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest text-right">Actions</div>
             </div>
@@ -909,7 +1260,9 @@ export default function PeoplePage() {
                   stream?.startsAt && new Date(stream.startsAt).getTime() > now,
                 );
                 const perReady = isPerReady(stream);
+                const privateInitStatus = getPrivateInitStatus(emp, stream);
                 const isStreamingLive =
+                  emp.payrollMode !== "private_payroll" &&
                   Boolean(stream) &&
                   status === "active" &&
                   perReady &&
@@ -918,7 +1271,13 @@ export default function PeoplePage() {
                   hasFreshPreview &&
                   hasFreshCheckpointProgress;
                 const statusLabel =
-                  isStreamingLive
+                  emp.payrollMode === "private_payroll"
+                    ? privateInitStatus === "confirmed"
+                      ? "Ready"
+                      : privateInitStatus === "processing"
+                        ? "Syncing"
+                        : "Setup"
+                    : isStreamingLive
                     ? "Streaming"
                     : hasMissingPrivateState
                       ? "State missing"
@@ -932,7 +1291,13 @@ export default function PeoplePage() {
                             ? "Paused"
                             : "Stopped";
                 const statusColor =
-                  isStreamingLive
+                  emp.payrollMode === "private_payroll"
+                    ? privateInitStatus === "confirmed"
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/30"
+                      : privateInitStatus === "processing"
+                        ? "bg-blue-500/15 text-blue-300 border-blue-400/30"
+                        : "bg-amber-500/15 text-amber-300 border-amber-400/30"
+                    : isStreamingLive
                     ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/30"
                     : hasMissingPrivateState
                       ? "bg-rose-500/15 text-rose-300 border-rose-400/30"
@@ -953,7 +1318,7 @@ export default function PeoplePage() {
                 return (
                   <div
                     key={emp.id}
-                    className="grid grid-cols-[1.5fr_1fr_1fr_1.2fr_1fr_1fr_1fr] gap-4 items-center px-6 py-5 hover:bg-white/5 transition-all duration-200"
+                    className="grid grid-cols-[1.8fr_0.8fr_0.8fr_1fr_0.8fr_1.8fr] gap-4 items-center px-6 py-5 hover:bg-white/5 transition-all duration-200"
                   >
                     <div className="flex items-center gap-4">
                       <div className="w-10 h-10 rounded-2xl bg-white/5 flex items-center justify-center shrink-0">
@@ -965,6 +1330,11 @@ export default function PeoplePage() {
                         <p className="text-sm font-semibold text-white truncate">
                           {emp.name}
                         </p>
+                        <div className="mt-1 flex items-center gap-2">
+                          <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-[#a8a8aa]">
+                            {payrollModeLabel(emp.payrollMode)}
+                          </span>
+                        </div>
                         <p className="text-[11px] text-[#8f8f95] font-mono truncate">
                           {shorten(emp.wallet)}
                         </p>
@@ -1015,7 +1385,9 @@ export default function PeoplePage() {
                         <>
                           <TrendingUp size={12} className="text-[#8f8f95]" />
                           <span className={status === "active" ? "font-bold text-amber-300" : "text-[#b6b6bc]"}>
-                            {stream?.checkpointCrankStatus === "active" && hasFreshPreview
+                            {emp.payrollMode === "private_payroll"
+                              ? "Manual payout"
+                              : stream?.checkpointCrankStatus === "active" && hasFreshPreview
                               ? "Checkpoint stale"
                               : status === "active"
                                 ? "Needs sync"
@@ -1025,37 +1397,7 @@ export default function PeoplePage() {
                       )}
                     </div>
 
-                    {/* Private */}
-                    <div>
-                      {(() => {
-                        const readiness = getPrivateReadinessState(
-                          emp,
-                          stream,
-                          hasMissingPrivateState,
-                        );
-                        return (
-                          <span
-                            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border ${readiness.className}`}
-                          >
-                            {readiness.label}
-                          </span>
-                        );
-                      })()}
-                      {emp.privateRecipientInitStatus === "failed" ? (
-                        <p className="mt-1 text-[10px] text-rose-300">
-                          {emp.privateRecipientInitError
-                            ? `${emp.privateRecipientInitError} Ask the employee to open Claim > Withdraw and initialize.`
-                            : "Auto-init failed. Ask the employee to open Claim > Withdraw and initialize."}
-                        </p>
-                      ) : emp.privateRecipientInitStatus === "pending" ||
-                        emp.privateRecipientInitStatus === "processing" ? (
-                        <p className="mt-1 text-[10px] text-[#8f8f95]">
-                          Employee can finish setup later from Claim &gt; Withdraw if needed.
-                        </p>
-                      ) : null}
-                    </div>
-
-                    {/* Stream status */}
+                    {/* Status + Privacy combined */}
                     <div>
                       <span
                         className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border ${statusColor}`}
@@ -1085,6 +1427,11 @@ export default function PeoplePage() {
                             <PauseCircle size={10} />
                             Paused
                           </>
+                        ) : emp.payrollMode === "private_payroll" ? (
+                          <>
+                            <Shield size={10} />
+                            {statusLabel}
+                          </>
                         ) : (
                           <>
                             <Ban size={10} />
@@ -1094,20 +1441,63 @@ export default function PeoplePage() {
                       </span>
                     </div>
 
-                    {/* Action */}
-                    <div className="flex items-center justify-end gap-2">
+                    {/* Actions */}
+                    <div className="flex items-center justify-end gap-2.5 flex-wrap">
+                      {emp.payrollMode === "private_payroll" &&
+                      getPrivateInitStatus(emp, stream) !== "confirmed" ? (
+                        <button
+                          onClick={() => {
+                            void initializePrivatePayrollRecipient(emp);
+                          }}
+                          disabled={
+                            !signMessage ||
+                            initializingWallets.includes(emp.wallet)
+                          }
+                          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#1eba98] bg-[#1eba98]/10 border border-[#1eba98]/30 rounded-xl hover:bg-[#1eba98]/15 transition-colors disabled:opacity-50"
+                        >
+                          {initializingWallets.includes(emp.wallet) ? (
+                            <Loader2 size={12} className="animate-spin" />
+                          ) : (
+                            "Init"
+                          )}
+                        </button>
+                      ) : null}
+                      {!stream ? (
+                        <button
+                          onClick={() => {
+                            const defaultSalary = emp.monthlySalaryUsd ?? emp.compensationAmountUsd ?? 0;
+                            setStreamSalaryInput(defaultSalary > 0 ? defaultSalary.toString() : "");
+                            setStreamModalEmployee(emp);
+                          }}
+                          disabled={!signMessage}
+                          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#1eba98] bg-[#1eba98]/10 border border-[#1eba98]/30 rounded-xl hover:bg-[#1eba98]/15 transition-colors disabled:opacity-50"
+                        >
+                          <Play size={12} />
+                          Stream
+                        </button>
+                      ) : null}
                       <Link
                         href={`/people/${emp.id}`}
-                        className="inline-flex items-center justify-center px-3 py-1.5 text-xs font-semibold text-white bg-white/5 border border-white/15 rounded-lg hover:bg-white/10 transition-colors no-underline"
+                        title="View Profile"
+                        className="inline-flex items-center justify-center w-9 h-9 text-[#a8a8aa] bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 hover:text-white transition-colors no-underline"
                       >
-                        Profile
+                        <Users size={15} />
                       </Link>
+                      {stream ? (
+                        <Link
+                          href={`/disburse?employee=${emp.id}`}
+                          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 transition-colors no-underline"
+                        >
+                          <TrendingUp size={13} />
+                          Stream
+                        </Link>
+                      ) : null}
                       <Link
-                        href={`/disburse?employee=${emp.id}`}
-                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-black rounded-lg hover:bg-gray-800 transition-colors no-underline"
+                        href={`/disburse/manual?employee=${emp.id}`}
+                        className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl hover:bg-amber-500/15 transition-colors no-underline"
                       >
-                        Payroll
-                        <ArrowUpRight size={10} />
+                        <Shield size={13} />
+                        Private
                       </Link>
                     </div>
                   </div>
@@ -1122,7 +1512,10 @@ export default function PeoplePage() {
       {showAdd && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center px-4"
-          onClick={() => setShowAdd(false)}
+          onClick={() => {
+            setShowAdd(false);
+            setIsPayrollGuideOpen(false);
+          }}
         >
           <div className="absolute inset-0 bg-black/20 backdrop-blur-[2px]" />
           <div
@@ -1131,12 +1524,24 @@ export default function PeoplePage() {
           >
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-bold text-white">Add employee</h2>
-              <button
-                onClick={() => setShowAdd(false)}
-                className="w-8 h-8 flex items-center justify-center rounded-full bg-white/5 text-[#8f8f95] hover:text-white hover:bg-white/10 transition-colors"
-              >
-                &times;
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsPayrollGuideOpen(true)}
+                  className="rounded-full border border-[#1eba98]/25 bg-[#1eba98]/10 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.18em] text-[#1eba98] transition-colors hover:bg-[#1eba98]/15"
+                >
+                  Quick guide
+                </button>
+                <button
+                  onClick={() => {
+                    setShowAdd(false);
+                    setIsPayrollGuideOpen(false);
+                  }}
+                  className="w-8 h-8 flex items-center justify-center rounded-full bg-white/5 text-[#8f8f95] hover:text-white hover:bg-white/10 transition-colors"
+                >
+                  &times;
+                </button>
+              </div>
             </div>
 
             <div className="space-y-5">
@@ -1197,53 +1602,93 @@ export default function PeoplePage() {
                   </select>
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-[11px] font-bold text-[#8f8f95] uppercase tracking-wider mb-1.5 block">
-                    Monthly Salary
+              <div className="grid grid-cols-2 items-start gap-4">
+                <div data-guide="payroll-mode-picker">
+                  <label className="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#8f8f95]">
+                    Payroll Mode
                   </label>
-                  <div className="relative">
-                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[#8f8f95] text-sm">$</span>
-                    <input
-                      value={newCompensationAmount}
-                      onChange={(e) => setNewCompensationAmount(e.target.value)}
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      placeholder="3000"
-                      className="w-full pl-8 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder:text-[#8f8f95] focus:outline-none focus:ring-2 focus:ring-[#1eba98]/25"
-                    />
+                  <div className="space-y-3">
+                    {PAYROLL_MODE_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setNewPayrollMode(option.value)}
+                        data-guide={
+                          option.value === "private_payroll"
+                            ? "mode-private-payroll"
+                            : option.value === "streaming"
+                              ? "mode-streaming"
+                              : undefined
+                        }
+                        className={`w-full rounded-xl border px-4 py-3 text-left transition-colors ${
+                          newPayrollMode === option.value
+                            ? "border-[#1eba98]/50 bg-[#1eba98]/10"
+                            : "border-white/10 bg-white/5 hover:bg-white/10"
+                        } min-h-[88px]`}
+                      >
+                        <p className="text-sm font-semibold text-white">
+                          {option.label}
+                        </p>
+                        <p className="mt-1 text-[11px] text-[#8f8f95]">
+                          {option.description}
+                        </p>
+                      </button>
+                    ))}
                   </div>
-                  {parsedAmount > 0 && (
-                    <p className="text-[11px] text-[#8f8f95] mt-2 font-mono">
-                      {previewRatePerSecond.toFixed(8)} USDC/sec
-                    </p>
-                  )}
                 </div>
+                <div className="space-y-4">
+                  <div data-guide="salary-input" className="min-h-[120px]">
+                    <label className="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#8f8f95]">
+                      Monthly Salary
+                    </label>
+                    <div className="relative">
+                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[#8f8f95] text-sm">$</span>
+                      <input
+                        value={newCompensationAmount}
+                        onChange={(e) => setNewCompensationAmount(e.target.value)}
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        placeholder="3000"
+                        className="w-full pl-8 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder:text-[#8f8f95] focus:outline-none focus:border-[#1eba98]/30 focus:ring-1 focus:ring-[#1eba98]/12"
+                      />
+                    </div>
+                    <div className="mt-2 min-h-[16px]">
+                      {parsedAmount > 0 ? (
+                        <p className="text-[11px] font-mono text-[#8f8f95]">
+                          {previewRatePerSecond.toFixed(8)} USDC/sec
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="min-h-[120px]">
+                    <label className="mb-2 block text-[11px] font-bold uppercase tracking-wider text-[#8f8f95]">
+                      {newPayrollMode === "private_payroll" ? "Payout mode" : "Settlement mode"}
+                    </label>
+                    <div className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-white/50 cursor-not-allowed">
+                      {newPayrollMode === "private_payroll"
+                        ? "Private payroll payouts"
+                        : "Private stream (ephemeral)"}
+                    </div>
+                    <div className="mt-2 min-h-[16px]" />
+                  </div>
+                </div>
+              </div>
+              {newPayrollMode !== "private_payroll" && (
                 <div>
                   <label className="text-[11px] font-bold text-[#8f8f95] uppercase tracking-wider mb-1.5 block">
-                    Settlement mode
+                    Stream starts at
                   </label>
                   <div className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-white/50 cursor-not-allowed">
-                    Private stream (ephemeral)
+                    Immediately upon onboarding
                   </div>
-                  <p className="text-[11px] text-[#8f8f95] mt-2">
-                    {payoutModeSummary(newPayoutMode)}
-                  </p>
                 </div>
-              </div>
-              <div>
-                <label className="text-[11px] font-bold text-[#8f8f95] uppercase tracking-wider mb-1.5 block">
-                  Stream starts at
-                </label>
-                <div className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-white/50 cursor-not-allowed">
-                  Immediately upon onboarding
-                </div>
-              </div>
+              )}
             </div>
 
             <button
               onClick={handleAdd}
+              data-guide="create-employee"
               disabled={
                 adding ||
                 !newName.trim() ||
@@ -1256,9 +1701,113 @@ export default function PeoplePage() {
               {adding ? (
                 <Loader2 size={16} className="animate-spin mx-auto" />
               ) : (
-                "Add Employee"
+                selectedPayrollModeCtaLabel
               )}
             </button>
+          </div>
+        </div>
+      )}
+      <InteractiveGuide
+        steps={PAYROLL_MODE_GUIDE_STEPS}
+        isOpen={showAdd && isPayrollGuideOpen}
+        onClose={() => setIsPayrollGuideOpen(false)}
+        onComplete={() => setIsPayrollGuideOpen(false)}
+        storageKeyPrefix="payroll-modes"
+      />
+
+      {/* Start Stream Confirmation Modal */}
+      {streamModalEmployee && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center px-4"
+          onClick={() => { if (!startingStream) setStreamModalEmployee(null); }}
+        >
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+          <div
+            className="relative w-full max-w-md rounded-[2rem] border border-white/10 bg-[#0a0a0a] p-8 shadow-[0_30px_80px_rgba(0,0,0,0.6)]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-xl font-bold text-white tracking-tight mb-1">
+              Start Streaming
+            </h2>
+            <p className="text-sm text-[#8f8f95] mb-6">
+              Set the monthly salary for <span className="text-white font-semibold">{streamModalEmployee.name}</span> and start real-time per-second streaming.
+            </p>
+
+            <div className="space-y-5">
+              {/* Employee Info */}
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold uppercase tracking-widest text-[#8f8f95]">Employee</span>
+                  <span className="text-xs text-[#8f8f95] font-mono">
+                    {streamModalEmployee.wallet.slice(0, 6)}...{streamModalEmployee.wallet.slice(-4)}
+                  </span>
+                </div>
+                <p className="text-base font-bold text-white">{streamModalEmployee.name}</p>
+                {streamModalEmployee.department && (
+                  <p className="text-xs text-[#8f8f95] mt-1">{streamModalEmployee.department} · {streamModalEmployee.role || "—"}</p>
+                )}
+              </div>
+
+              {/* Salary Input */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-widest text-[#8f8f95] mb-2">
+                  Monthly Salary (USDC)
+                </label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[#8f8f95] font-bold text-sm">$</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={streamSalaryInput}
+                    onChange={(e) => setStreamSalaryInput(e.target.value)}
+                    placeholder="e.g. 3000"
+                    className="w-full rounded-xl border border-white/10 bg-white/5 py-3 pl-8 pr-4 text-white text-lg font-bold outline-none focus:border-[#1eba98]/40 focus:ring-2 focus:ring-[#1eba98]/10 transition-all placeholder:text-[#555]"
+                    autoFocus
+                  />
+                </div>
+                {parseFloat(streamSalaryInput) > 0 && (
+                  <p className="mt-2 text-xs text-[#8f8f95]">
+                    Rate: <span className="text-white font-mono">${(monthlyUsdToRatePerSecond(parseFloat(streamSalaryInput)) * 86400).toFixed(6)}</span> USDC/day
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="mt-8 flex gap-3">
+              <button
+                onClick={() => setStreamModalEmployee(null)}
+                disabled={startingStream}
+                className="flex-1 rounded-xl border border-white/10 bg-white/5 py-3 text-sm font-bold text-[#8f8f95] hover:bg-white/10 hover:text-white transition-colors disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const salary = parseFloat(streamSalaryInput);
+                  if (!salary || salary <= 0) {
+                    toast.error("Enter a valid monthly salary");
+                    return;
+                  }
+                  void handleStartStream(streamModalEmployee, salary);
+                }}
+                disabled={startingStream || !parseFloat(streamSalaryInput)}
+                className="flex-1 rounded-xl bg-[#1eba98] py-3 text-sm font-bold text-black hover:bg-[#1eba98]/80 transition-colors disabled:opacity-40 shadow-[0_0_20px_rgba(30,186,152,0.25)] flex items-center justify-center gap-2"
+              >
+                {startingStream ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    Starting...
+                  </>
+                ) : (
+                  <>
+                    <Play size={14} />
+                    Start Stream
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

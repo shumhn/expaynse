@@ -197,8 +197,11 @@ export async function POST(request: NextRequest) {
       | {
           kind?: "payroll-run";
           wallet?: string;
+          mode?: "streaming" | "private_payroll";
           totalAmount?: number;
           employeeCount?: number;
+          employeeIds?: string[];
+          employeeNames?: string[];
           recipientAddresses?: string[];
           depositSig?: string;
           transferSig?: string;
@@ -259,8 +262,21 @@ export async function POST(request: NextRequest) {
 
         const payrollRun = await savePayrollRun({
           wallet: body.wallet,
+          mode: body.mode === "private_payroll" ? "private_payroll" : "streaming",
           totalAmount: body.totalAmount,
           employeeCount: body.employeeCount,
+          employeeIds: Array.isArray(body.employeeIds)
+            ? body.employeeIds.filter(
+                (value): value is string =>
+                  typeof value === "string" && value.trim().length > 0,
+              )
+            : undefined,
+          employeeNames: Array.isArray(body.employeeNames)
+            ? body.employeeNames.filter(
+                (value): value is string =>
+                  typeof value === "string" && value.trim().length > 0,
+              )
+            : undefined,
           recipientAddresses: body.recipientAddresses,
           depositSig: body.depositSig,
           transferSig: body.transferSig,
@@ -279,6 +295,7 @@ export async function POST(request: NextRequest) {
           metadata: {
             employeeCount: payrollRun.employeeCount,
             status: payrollRun.status,
+            mode: payrollRun.mode ?? "streaming",
           },
         });
 

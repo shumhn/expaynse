@@ -71,12 +71,7 @@ function CustomTooltip({
 
 export function CompensationBreakdownChart({ employees, streams }: CompensationChartProps) {
   const data = useMemo(() => computeAllocation(employees, streams), [employees, streams]);
-  const isMock = data.length === 0;
-
-  // Fallback to empty state if no active streams
-  const displayData = isMock 
-    ? [{ name: "No Active Streams", value: 100, color: "#2a2a2a", rawAmount: 0 }] 
-    : data;
+  const isEmpty = data.length === 0;
 
   return (
     <Card className="relative">
@@ -86,30 +81,37 @@ export function CompensationBreakdownChart({ employees, streams }: CompensationC
       </CardHeader>
       <CardContent>
         <div className="h-[280px] w-full min-w-0 transition-opacity duration-300">
-          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={280}>
-            <PieChart>
-              <Pie
-                data={displayData}
-                cx="50%"
-                cy="50%"
-                innerRadius={60}
-                outerRadius={90}
-                paddingAngle={isMock ? 0 : 4}
-                dataKey="value"
-              >
-                {displayData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} stroke="transparent" />
-                ))}
-              </Pie>
-              {!isMock && <Tooltip content={<CustomTooltip />} />}
-              {!isMock && (
+          {isEmpty ? (
+            <div className="flex h-full items-center justify-center text-center">
+              <div>
+                <p className="text-sm font-semibold text-white">No active stream data yet</p>
+                <p className="mt-2 text-xs text-[#a8a8aa]">Department allocation appears once live payroll streams are running.</p>
+              </div>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={280}>
+              <PieChart>
+                <Pie
+                  data={data}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={60}
+                  outerRadius={90}
+                  paddingAngle={4}
+                  dataKey="value"
+                >
+                  {data.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} stroke="transparent" />
+                  ))}
+                </Pie>
+                <Tooltip content={<CustomTooltip />} />
                 <Legend
                   verticalAlign="bottom"
                   formatter={(value) => <span className="text-[#a8a8aa] text-sm">{value}</span>}
                 />
-              )}
-            </PieChart>
-          </ResponsiveContainer>
+              </PieChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </CardContent>
     </Card>

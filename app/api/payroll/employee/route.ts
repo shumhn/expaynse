@@ -9,7 +9,6 @@ import {
   listEmployeesByWallet,
   listStreams,
   updateStreamRuntimeState,
-  updateStreamStatus,
   type EmployeeRecord,
   type PayrollPayoutMode,
   type PayrollStreamRecord,
@@ -20,6 +19,7 @@ import {
   hasCapStateChanged,
 } from "@/lib/server/monthly-cap";
 import type { CheckpointCrankStatus } from "@/lib/checkpoint-sync";
+import { normalizePayrollMode, type PayrollMode } from "@/lib/payroll-mode";
 
 const TEE_URL = "https://devnet-tee.magicblock.app";
 const PRIVATE_PAYROLL_STATE_LEN = 241;
@@ -29,6 +29,7 @@ type PrivatePayrollPreview = {
   privatePayrollPda: string;
   employee: string;
   streamId: string;
+  teeObservedAt: string;
   status: PayrollStreamStatus;
   version: string;
   lastCheckpointTs: string;
@@ -39,6 +40,32 @@ type PrivatePayrollPreview = {
   elapsedSeconds: number;
   pendingAccrualMicro: string;
   claimableAmountMicro: string;
+  effectiveClaimableAmountMicro: string;
+  monthlyCapUsd: number | null;
+  monthlyCapMicro: string | null;
+  cycleKey: string | null;
+  cycleStart: string | null;
+  cycleEnd: string | null;
+  paidThisCycleMicro: string | null;
+  remainingCapMicro: string | null;
+  capReached: boolean;
+};
+
+type PrivatePayrollSnapshot = {
+  employeePda: string;
+  privatePayrollPda: string;
+  employee: string;
+  streamId: string;
+  teeObservedAt: string;
+  status: PayrollStreamStatus;
+  version: string;
+  lastCheckpointTs: string;
+  ratePerSecondMicro: string;
+  lastAccrualTimestamp: string;
+  accruedUnpaidMicro: string;
+  totalPaidPrivateMicro: string;
+  pendingAccrualMicro: string;
+  rawClaimableAmountMicro: string;
   effectiveClaimableAmountMicro: string;
   monthlyCapUsd: number | null;
   monthlyCapMicro: string | null;
@@ -77,16 +104,16 @@ type EmployeePayrollStreamSummary = {
   };
   liveState: {
     ready: boolean;
-    source: "per-preview" | "stream-metadata";
+    source: "per-snapshot" | "stream-metadata";
     reason:
-      | "preview-available"
+      | "snapshot-available"
       | "tee-token-missing"
       | "stream-not-delegated"
       | "private-account-not-initialized"
       | "private-state-missing"
-      | "preview-unavailable";
+      | "snapshot-unavailable";
   };
-  preview: PrivatePayrollPreview | null;
+  snapshot: PrivatePayrollSnapshot | null;
 };
 
 type EmployeePayrollSummaryResponse = {
@@ -95,6 +122,7 @@ type EmployeePayrollSummaryResponse = {
     id: string;
     employerWallet: string;
     name: string;
+    payrollMode: PayrollMode;
     privateRecipientInitializedAt: string | null;
   }>;
   streams: EmployeePayrollStreamSummary[];
@@ -157,6 +185,7 @@ function decodePrivatePayrollState(
   | "pendingAccrualMicro"
   | "claimableAmountMicro"
   | "effectiveClaimableAmountMicro"
+  | "teeObservedAt"
   | "monthlyCapUsd"
   | "monthlyCapMicro"
   | "cycleKey"
@@ -268,6 +297,7 @@ async function fetchPrivatePayrollPreview(args: {
 
   return {
     ...baseState,
+    teeObservedAt: String(now),
     elapsedSeconds,
     pendingAccrualMicro: pendingAccrualMicro.toString(),
     claimableAmountMicro: claimableAmountMicro.toString(),
@@ -304,6 +334,7 @@ async function buildStreamSummary(args: {
   let resolvedStatus = stream.status;
 
   let preview: PrivatePayrollPreview | null = null;
+  let snapshot: PrivatePayrollSnapshot | null = null;
   let liveState: EmployeePayrollStreamSummary["liveState"];
 
   if (
@@ -373,39 +404,51 @@ async function buildStreamSummary(args: {
           : preview.status;
       preview.status = resolvedStatus;
 
-      if (resolvedStatus !== stream.status) {
-        await updateStreamStatus({
-          employerWallet: employee.employerWallet,
-          streamId: stream.id,
-          status: resolvedStatus,
-        });
-      }
+      snapshot = {
+        employeePda: preview.employeePda,
+        privatePayrollPda: preview.privatePayrollPda,
+        employee: preview.employee,
+        streamId: preview.streamId,
+        teeObservedAt: preview.teeObservedAt,
+        status: preview.status,
+        version: preview.version,
+        lastCheckpointTs: preview.lastCheckpointTs,
+        ratePerSecondMicro: preview.ratePerSecondMicro,
+        lastAccrualTimestamp: preview.lastAccrualTimestamp,
+        accruedUnpaidMicro: preview.accruedUnpaidMicro,
+        totalPaidPrivateMicro: preview.totalPaidPrivateMicro,
+        pendingAccrualMicro: preview.pendingAccrualMicro,
+        rawClaimableAmountMicro: preview.claimableAmountMicro,
+        effectiveClaimableAmountMicro: preview.effectiveClaimableAmountMicro,
+        monthlyCapUsd: preview.monthlyCapUsd,
+        monthlyCapMicro: preview.monthlyCapMicro,
+        cycleKey: preview.cycleKey,
+        cycleStart: preview.cycleStart,
+        cycleEnd: preview.cycleEnd,
+        paidThisCycleMicro: preview.paidThisCycleMicro,
+        remainingCapMicro: preview.remainingCapMicro,
+        capReached: preview.capReached,
+      };
 
       liveState = {
         ready: true,
-        source: "per-preview",
-        reason: "preview-available",
+        source: "per-snapshot",
+        reason: "snapshot-available",
       };
     } catch (error: unknown) {
       console.error("[Employee Dashboard] fetchPrivatePayrollPreview failed:", error);
       const missingPrivateState = isMissingPrivateStateError(error);
       preview = null;
+      snapshot = null;
       if (missingPrivateState) {
         resolvedStatus = "stopped";
-        if (resolvedStatus !== stream.status) {
-          await updateStreamStatus({
-            employerWallet: employee.employerWallet,
-            streamId: stream.id,
-            status: resolvedStatus,
-          });
-        }
       }
       liveState = {
         ready: false,
         source: "stream-metadata",
         reason: missingPrivateState
           ? "private-state-missing"
-          : "preview-unavailable",
+          : "snapshot-unavailable",
       };
     }
   }
@@ -421,7 +464,7 @@ async function buildStreamSummary(args: {
     },
     stream: {
       id: stream.id,
-      status: resolvedStatus,
+      status: stream.status,
       ratePerSecond: stream.ratePerSecond,
       payoutMode: stream.payoutMode === "ephemeral" ? "ephemeral" : "base",
       allowedPayoutModes:
@@ -432,9 +475,9 @@ async function buildStreamSummary(args: {
                 mode === "base" || mode === "ephemeral",
             )
           : [stream.payoutMode === "ephemeral" ? "ephemeral" : "base"],
-      employeePda: stream.employeePda ?? preview?.employeePda ?? null,
+      employeePda: stream.employeePda ?? snapshot?.employeePda ?? null,
       privatePayrollPda:
-        stream.privatePayrollPda ?? preview?.privatePayrollPda ?? null,
+        stream.privatePayrollPda ?? snapshot?.privatePayrollPda ?? null,
       permissionPda: stream.permissionPda ?? null,
       delegatedAt: stream.delegatedAt ?? null,
       recipientPrivateInitializedAt: stream.recipientPrivateInitializedAt ?? null,
@@ -445,7 +488,7 @@ async function buildStreamSummary(args: {
       updatedAt: stream.updatedAt,
     },
     liveState,
-    preview,
+    snapshot,
   };
 }
 
@@ -512,6 +555,7 @@ export async function GET(request: NextRequest) {
         id: employee.id,
         employerWallet: employee.employerWallet,
         name: employee.name,
+        payrollMode: normalizePayrollMode(employee.payrollMode),
         privateRecipientInitializedAt:
           employee.privateRecipientInitializedAt ?? null,
       })),

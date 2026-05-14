@@ -64,7 +64,6 @@ export function AppSidebar({
   const isClaimRoute = pathname === "/claim" || pathname?.startsWith("/claim/");
   const isEmployerRoute =
     pathname === "/dashboard" ||
-    pathname === "/setup" ||
     pathname === "/people" ||
     pathname?.startsWith("/people/") ||
     pathname === "/disburse" ||
@@ -170,6 +169,15 @@ export function AppSidebar({
                 key={item.href}
                 href={item.href}
                 onClick={onClose}
+                data-guide={
+                  item.href === "/people"
+                    ? "employee-nav"
+                    : item.href === "/treasury"
+                      ? "treasury-nav"
+                      : item.href === "/dashboard"
+                        ? "home-nav"
+                        : undefined
+                }
                 className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-semibold transition-all no-underline ${isActive
                   ? "bg-[#1eba98]/10 text-[#1eba98] border border-[#1eba98]/20 shadow-xs"
                   : "text-[#a8a8aa] hover:text-white hover:bg-white/5"

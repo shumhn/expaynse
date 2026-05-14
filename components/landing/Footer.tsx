@@ -28,14 +28,14 @@ Privacy-first real-time payroll streaming on Solana. Pay employees every second 
                         title="Ecosystem"
                         links={[
                             { label: "Treasury Dashboard", href: "/dashboard" },
-                            { label: "Launch App", href: "/get-started" },
+                            { label: "Launch App", href: "/dashboard" },
                             { label: "Claim Pay", href: "/claim" }
                         ]}
                     />
                     <FooterColumn
                         title="Resources"
                         links={[
-                            { label: "Setup", href: "/setup" },
+                            { label: "Treasury", href: "/treasury" },
                             { label: "GitHub", href: "#" }
                         ]}
                     />
@@ -47,6 +47,11 @@ Privacy-first real-time payroll streaming on Solana. Pay employees every second 
                 <div className="flex items-center gap-8">
                     <p>© 2026 Expaynse Labs</p>
                     <p className="hidden md:block">The future of payroll is real-time.</p>
+                </div>
+
+                <div className="flex items-center gap-4">
+                    <img src="/magicblock-logo.png" alt="MagicBlock" className="w-5 h-5 rounded opacity-50" />
+                    <img src="/solanaLogo.png" alt="Solana" className="w-4 h-4 opacity-50" />
                 </div>
 
                 <div className="flex items-center gap-6 cursor-default">

@@ -460,6 +460,89 @@ function isMissingPrivateStateMessage(message: string) {
   );
 }
 
+type StoppedLifecyclePhase =
+  | "not_stopped"
+  | "fully_closed"
+  | "needs_settlement"
+  | "ready_to_close";
+
+const BASE_DEVNET_RPC_URL =
+  process.env.NEXT_PUBLIC_SOLANA_RPC_URL || clusterApiUrl("devnet");
+const BASE_DEVNET_RPC_FALLBACKS = Array.from(
+  new Set([BASE_DEVNET_RPC_URL, clusterApiUrl("devnet")].filter(Boolean)),
+);
+
+function getRemainingPayrollState(preview?: PrivatePayrollStateResponse | null) {
+  const accruedMicro = Number(preview?.state.accruedUnpaidMicro ?? "0");
+  const claimableMicro = Number(preview?.state.effectiveClaimableAmountMicro ?? "0");
+  const hasAccruedToSettle = Number.isFinite(accruedMicro) && accruedMicro > 0;
+  const hasClaimableToSettle =
+    Number.isFinite(claimableMicro) && claimableMicro > 0;
+  return {
+    accruedMicro,
+    claimableMicro,
+    hasAccruedToSettle,
+    hasClaimableToSettle,
+    hasRemainingPayrollToSettle: hasAccruedToSettle || hasClaimableToSettle,
+  };
+}
+
+function deriveStoppedLifecycleState(args: {
+  effectiveStatus: StreamStatus | null | undefined;
+  preview?: PrivatePayrollStateResponse | null;
+  hasMissingPrivateState: boolean;
+}) {
+  if (args.effectiveStatus !== "stopped") {
+    return {
+      phase: "not_stopped" as const,
+      isFullyClosed: false,
+      mustSettleBeforeClose: false,
+      ...getRemainingPayrollState(args.preview),
+    };
+  }
+
+  if (args.hasMissingPrivateState) {
+    return {
+      phase: "fully_closed" as const,
+      isFullyClosed: true,
+      mustSettleBeforeClose: false,
+      ...getRemainingPayrollState(args.preview),
+    };
+  }
+
+  if (!args.preview) {
+    return {
+      phase: "needs_settlement" as const,
+      isFullyClosed: false,
+      mustSettleBeforeClose: true,
+      ...getRemainingPayrollState(args.preview),
+    };
+  }
+
+  const remaining = getRemainingPayrollState(args.preview);
+  if (remaining.hasRemainingPayrollToSettle) {
+    return {
+      phase: "needs_settlement" as const,
+      isFullyClosed: false,
+      mustSettleBeforeClose: true,
+      ...remaining,
+    };
+  }
+
+  return {
+    phase: "ready_to_close" as const,
+    isFullyClosed: false,
+    mustSettleBeforeClose: false,
+    ...remaining,
+  };
+}
+
+function isRpcRateLimitError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("429") || message.includes("too many requests");
+}
+
 function EmployerPageContent() {
   const searchParams = useSearchParams();
   const { publicKey, connected, signTransaction, signMessage } = useWallet();
@@ -478,6 +561,10 @@ function EmployerPageContent() {
   );
   const [onboardingStream, setOnboardingStream] = useState<string | null>(null);
   const [restartingStream, setRestartingStream] = useState<string | null>(null);
+  const [closingStream, setClosingStream] = useState<string | null>(null);
+  const [closeProgressByStream, setCloseProgressByStream] = useState<
+    Record<string, string>
+  >({});
   const [checkpointingStream, setCheckpointingStream] = useState<string | null>(
     null,
   );
@@ -901,19 +988,31 @@ function EmployerPageContent() {
       "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6",
     );
     const employeeAddress = new PublicKey(employeePda);
-    const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
+    const connections = BASE_DEVNET_RPC_FALLBACKS.map(
+      (rpcUrl) => new Connection(rpcUrl, "confirmed"),
+    );
 
-    const attempts = 12;
-    const delayMs = 1500;
+    const attempts = 16;
+    const delayMs = 500;
+    let lastError: unknown = null;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const accountInfo = await connection.getAccountInfo(
-        employeeAddress,
-        "confirmed",
-      );
+      for (const connection of connections) {
+        try {
+          const accountInfo = await connection.getAccountInfo(
+            employeeAddress,
+            "confirmed",
+          );
 
-      if (accountInfo?.owner?.equals(payrollProgramId)) {
-        return;
+          if (accountInfo?.owner?.equals(payrollProgramId)) {
+            return;
+          }
+        } catch (error: unknown) {
+          lastError = error;
+          if (!isRpcRateLimitError(error)) {
+            throw error;
+          }
+        }
       }
 
       if (attempt < attempts - 1) {
@@ -921,8 +1020,14 @@ function EmployerPageContent() {
       }
     }
 
+    if (isRpcRateLimitError(lastError)) {
+      throw new Error(
+        "Base RPC is rate-limited right now while verifying employee ownership. Wait a moment and retry close.",
+      );
+    }
+
     throw new Error(
-      "Employee account is still delegated on base. Wait a moment and retry restart.",
+      "Employee account is still delegated on base. Wait a moment and retry close.",
     );
   }, []);
 
@@ -1045,7 +1150,7 @@ function EmployerPageContent() {
           if (!silent) {
             if (stream.status === "stopped") {
               toast.info(
-                "This stopped stream no longer has a private payroll state in PER. Restart can proceed now.",
+                "This stopped stream no longer has a private payroll state in PER. It is fully closed now and ready for a fresh stream if needed.",
               );
             } else {
               toast.info(
@@ -1762,6 +1867,33 @@ function EmployerPageContent() {
         return;
       }
 
+      const effectiveStatus = missingPrivateStates[stream.id]
+        ? "stopped"
+        : getEffectiveStreamStatus(stream, privateStates[stream.id] ?? null) ??
+          stream.status;
+      const observedCheckpointStatus = deriveObservedCheckpointCrankStatus({
+        currentStatus: stream.checkpointCrankStatus,
+        lastAccrualTimestamp:
+          privateStates[stream.id]?.state.lastAccrualTimestamp,
+        nowMs,
+      });
+
+      if (mode === "schedule" && effectiveStatus !== "active") {
+        toast.info(
+          "Checkpoint sync should only run for active streams. Resume the stream first if you want live accrual to continue.",
+        );
+        return;
+      }
+
+      if (
+        mode === "cancel" &&
+        observedCheckpointStatus !== "active" &&
+        stream.checkpointCrankStatus !== "active"
+      ) {
+        toast.info("Checkpoint sync is not currently running for this stream.");
+        return;
+      }
+
       setCheckpointingStream(stream.id);
       try {
         const teeAuthToken = await getOrFetchToken();
@@ -1800,6 +1932,9 @@ function EmployerPageContent() {
       buildCheckpointCrankAndFinalize,
       fetchPayrollConfig,
       fetchPrivatePreview,
+      missingPrivateStates,
+      nowMs,
+      privateStates,
     ],
   );
 
@@ -1807,6 +1942,18 @@ function EmployerPageContent() {
     async (stream: PayrollStream) => {
       if (!walletAddress) {
         toast.error("Connect your employer wallet first");
+        return;
+      }
+
+      const effectiveStatus = missingPrivateStates[stream.id]
+        ? "stopped"
+        : getEffectiveStreamStatus(stream, privateStates[stream.id] ?? null) ??
+          stream.status;
+
+      if (effectiveStatus !== "active") {
+        toast.info(
+          "Checkpoint sync restart only makes sense for active streams. Resume the stream first if you want live accrual to continue.",
+        );
         return;
       }
 
@@ -1863,6 +2010,8 @@ function EmployerPageContent() {
       buildCheckpointCrankAndFinalize,
       fetchPayrollConfig,
       fetchPrivatePreview,
+      missingPrivateStates,
+      privateStates,
     ],
   );
 
@@ -2073,7 +2222,11 @@ function EmployerPageContent() {
   );
 
   const handleControlStream = useCallback(
-    async (stream: PayrollStream, action: StreamControlAction) => {
+    async (
+      stream: PayrollStream,
+      action: StreamControlAction,
+      options?: { awaitCheckpointCleanup?: boolean },
+    ) => {
       if (!walletAddress || !publicKey || !signTransaction || !signMessage) {
         toast.error(
           "Connect a wallet that supports transaction signing and message signing",
@@ -2095,6 +2248,17 @@ function EmployerPageContent() {
         !stream.delegatedAt
       ) {
         toast.error("Onboard this stream to PER before controlling it");
+        return;
+      }
+
+      const privateInitStatus = resolvePrivateInitStatus(employee, stream);
+
+      if (action === "resume" && privateInitStatus !== "confirmed") {
+        toast.info(
+          privateInitStatus === "failed"
+            ? "The employee's private recipient setup failed. Ask them to open Claim > Withdraw and initialize it before resuming payroll."
+            : "The employee must initialize their private recipient before this stream can go live.",
+        );
         return;
       }
 
@@ -2125,7 +2289,7 @@ function EmployerPageContent() {
           }
 
           toast.info(
-            "Private payroll state is missing in PER. Restart/onboard this stream before resume or pause.",
+            "Private payroll state is missing in PER. This stream needs a fresh setup before it can go live again.",
           );
           return;
         }
@@ -2147,7 +2311,7 @@ function EmployerPageContent() {
             );
             await fetchPayrollConfig();
             toast.info(
-              "Private payroll state is already absent in PER. Nothing left to stop.",
+              "Private payroll state is already absent in PER. There is nothing left to close here.",
             );
             return;
           }
@@ -2224,8 +2388,12 @@ function EmployerPageContent() {
         const hasCommitTx = !!controlBuild.transactions.commitEmployee?.transactionBase64;
         toast.info(
           hasCommitTx
-            ? "Approve 2 employer transactions to control this stream"
-            : "Approve 1 employer transaction to control this stream",
+            ? action === "stop"
+              ? "Approve 2 employer transactions to move this stream into its final close state"
+              : "Approve 2 employer transactions to control this stream"
+            : action === "stop"
+              ? "Approve 1 employer transaction to move this stream into its final close state"
+              : "Approve 1 employer transaction to control this stream",
         );
 
         const controlSignature = await signAndSend(
@@ -2319,11 +2487,10 @@ function EmployerPageContent() {
             ? "Payroll stream paused with employer wallet"
             : action === "resume"
               ? "Payroll stream resumed with employer wallet"
-              : "Payroll stream stopped with employer wallet",
+              : "Payroll stream moved into its terminal close state on-chain",
         );
-        setControllingStream(null);
 
-        void (async () => {
+        const finalizeCheckpointAndRefresh = async () => {
           try {
             if (action === "resume") {
               await buildCheckpointCrankAndFinalize({
@@ -2369,7 +2536,13 @@ function EmployerPageContent() {
               ),
             ]);
           }
-        })();
+        };
+
+        if (options?.awaitCheckpointCleanup) {
+          await finalizeCheckpointAndRefresh();
+        } else {
+          void finalizeCheckpointAndRefresh();
+        }
         return;
       } catch (err: unknown) {
         const message =
@@ -2403,7 +2576,7 @@ function EmployerPageContent() {
           await fetchPrivatePreview(stream);
           await fetchPayrollConfig();
           toast.info(
-            "Stop was rejected by current on-chain state. Synced latest stream status from PER.",
+            "Close prep was rejected by current on-chain state. Synced latest stream status from PER.",
           );
         } else {
           toast.error(`Stream control failed: ${message}`);
@@ -2432,25 +2605,52 @@ function EmployerPageContent() {
   const handleBatchResume = useCallback(async () => {
     const pausedStreams = streams.filter((stream) => {
       const preview = privateStates[stream.id] ?? null;
-      const status = getEffectiveStreamStatus(stream, preview);
-      return status === "paused";
+      const status = resolveStatusWithMissing(stream, preview);
+      const employee = managedEmployees.find(
+        (managedEmployee) => managedEmployee.id === stream.employeeId,
+      );
+      const privateInitStatus = employee
+        ? resolvePrivateInitStatus(employee, stream)
+        : "pending";
+      return (
+        status === "paused" &&
+        !!stream.employeePda &&
+        !!stream.privatePayrollPda &&
+        !!stream.permissionPda &&
+        !!stream.delegatedAt &&
+        privateInitStatus === "confirmed"
+      );
     });
 
     if (pausedStreams.length === 0) {
-      toast.info("No paused streams available to resume");
+      toast.info(
+        "No paused streams are fully ready to resume. Make sure PER is onboarded and the employee has initialized their private recipient.",
+      );
       return;
     }
 
     for (const stream of pausedStreams) {
       await handleControlStream(stream, "resume");
     }
-  }, [streams, privateStates, handleControlStream]);
+  }, [
+    streams,
+    privateStates,
+    resolveStatusWithMissing,
+    handleControlStream,
+    managedEmployees,
+  ]);
 
   const handleBatchPause = useCallback(async () => {
     const activeStreams = streams.filter((stream) => {
       const preview = privateStates[stream.id] ?? null;
-      const status = getEffectiveStreamStatus(stream, preview);
-      return status === "active";
+      const status = resolveStatusWithMissing(stream, preview);
+      return (
+        status === "active" &&
+        !!stream.employeePda &&
+        !!stream.privatePayrollPda &&
+        !!stream.permissionPda &&
+        !!stream.delegatedAt
+      );
     });
 
     if (activeStreams.length === 0) {
@@ -2461,13 +2661,106 @@ function EmployerPageContent() {
     for (const stream of activeStreams) {
       await handleControlStream(stream, "pause");
     }
-  }, [streams, privateStates, handleControlStream]);
+  }, [streams, privateStates, resolveStatusWithMissing, handleControlStream]);
+
+  const fetchLatestStreamForEmployee = useCallback(
+    async (employeeId: string) => {
+      if (!walletAddress || !signMessage) return null;
+
+      const response = await walletAuthenticatedFetch({
+        wallet: walletAddress,
+        signMessage,
+        path: `/api/streams?employerWallet=${walletAddress}`,
+      });
+
+      const json = (await response.json()) as {
+        streams?: PayrollStream[];
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(json.error || "Failed to refresh payroll streams");
+      }
+
+      const nextStreams = json.streams ?? [];
+      setStreams(nextStreams);
+
+      const matches = nextStreams.filter((stream) => stream.employeeId === employeeId);
+      if (matches.length === 0) return null;
+
+      matches.sort((left, right) => {
+        const priorityDelta =
+          (STREAM_STATUS_PRIORITY[right.status] ?? 0) -
+          (STREAM_STATUS_PRIORITY[left.status] ?? 0);
+        if (priorityDelta !== 0) return priorityDelta;
+        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      });
+
+      return matches[0] ?? null;
+    },
+    [walletAddress, signMessage],
+  );
+
+  const updateCloseProgress = useCallback((streamId: string, message: string) => {
+    setCloseProgressByStream((prev) => ({
+      ...prev,
+      [streamId]: message,
+    }));
+  }, []);
+
+  const clearCloseProgress = useCallback((streamId: string) => {
+    setCloseProgressByStream((prev) => {
+      if (!prev[streamId]) {
+        return prev;
+      }
+
+      const next = { ...prev };
+      delete next[streamId];
+      return next;
+    });
+  }, []);
 
   const handleRestartStoppedStream = useCallback(
-    async (stream: PayrollStream) => {
+    async (
+      stream: PayrollStream,
+      options?: {
+        createReplacement?: boolean;
+        onProgress?: (message: string) => void;
+      },
+    ) => {
       if (!walletAddress || !publicKey || !signTransaction || !signMessage) {
         toast.error(
           "Connect a wallet that supports transaction signing and message signing",
+        );
+        return;
+      }
+
+      const createReplacement = options?.createReplacement !== false;
+      const onProgress = options?.onProgress;
+
+      const preview = privateStates[stream.id] ?? null;
+      const effectiveStatus = resolveStatusWithMissing(stream, preview);
+      const stoppedLifecycle = deriveStoppedLifecycleState({
+        effectiveStatus,
+        preview,
+        hasMissingPrivateState: !!missingPrivateStates[stream.id],
+      });
+      const mustSettleBeforeRestart = stoppedLifecycle.mustSettleBeforeClose;
+
+      if (effectiveStatus !== "stopped") {
+        toast.info(
+          createReplacement
+            ? "Only fully closed streams should be replaced. Close this stream first if you want a fresh payroll stream."
+            : "Only stopped streams can be fully closed. Pause or stop the stream first if needed.",
+        );
+        return;
+      }
+
+      if (mustSettleBeforeRestart) {
+        toast.info(
+          createReplacement
+            ? "This stopped stream still has private payroll to reconcile. Settle the remaining payroll first, close the stream, then create a fresh stream."
+            : "This stopped stream still has private payroll to reconcile. Settle the remaining payroll state first, then close the stream.",
         );
         return;
       }
@@ -2485,6 +2778,7 @@ function EmployerPageContent() {
             employerWallet: walletAddress,
             streamId: stream.id,
             teeAuthToken,
+            createReplacement,
           }),
         });
 
@@ -2495,8 +2789,8 @@ function EmployerPageContent() {
         if (!response.ok) {
           throw new Error(
             "error" in json
-              ? json.error || "Failed to build stopped-stream restart"
-              : "Failed to build stopped-stream restart",
+              ? json.error || "Failed to build stopped-stream cleanup"
+              : "Failed to build stopped-stream cleanup",
           );
         }
 
@@ -2505,7 +2799,14 @@ function EmployerPageContent() {
         if (restartBuild.status === "already-reset") {
           toast.success(
             restartBuild.message ||
-            "A fresh replacement stream already exists for this employee.",
+            (createReplacement
+              ? "A fresh replacement stream already exists for this employee."
+              : "This stream is already fully closed."),
+          );
+          onProgress?.(
+            createReplacement
+              ? "Fresh stream already prepared"
+              : "This stream is already fully closed",
           );
           await fetchPayrollConfig();
           return;
@@ -2519,7 +2820,9 @@ function EmployerPageContent() {
 
         if (transactionCount > 0) {
           toast.info(
-            `Approve ${transactionCount} restart transaction${transactionCount === 1 ? "" : "s"} in your wallet`,
+            createReplacement
+              ? `Approve ${transactionCount} cleanup transaction${transactionCount === 1 ? "" : "s"} to finish this stream and prepare a fresh one`
+              : `Approve ${transactionCount} cleanup transaction${transactionCount === 1 ? "" : "s"} to fully close this stream`,
           );
         }
 
@@ -2530,6 +2833,7 @@ function EmployerPageContent() {
         } = {};
 
         if (restartBuild.transactions.closePrivatePayroll) {
+          onProgress?.("Closing private payroll");
           signatures.closePrivatePayroll = await signAndSend(
             restartBuild.transactions.closePrivatePayroll.transactionBase64,
             signTransaction,
@@ -2543,6 +2847,7 @@ function EmployerPageContent() {
         }
 
         if (restartBuild.transactions.undelegateEmployee) {
+          onProgress?.("Undelegating from PER");
           signatures.undelegateEmployee = await signAndSend(
             restartBuild.transactions.undelegateEmployee.transactionBase64,
             signTransaction,
@@ -2556,13 +2861,16 @@ function EmployerPageContent() {
         }
 
         if (restartBuild.transactions.closeEmployee) {
+          onProgress?.("Waiting for base ownership sync");
           await waitForEmployeeOwnership(restartBuild.employeePda);
 
+          onProgress?.("Finalizing close on base");
           signatures.closeEmployee = await signAndSend(
             restartBuild.transactions.closeEmployee.transactionBase64,
             signTransaction,
             {
               sendTo: restartBuild.transactions.closeEmployee.sendTo,
+              rpcUrl: BASE_DEVNET_RPC_URL,
               signMessage,
               publicKey,
             },
@@ -2581,10 +2889,12 @@ function EmployerPageContent() {
             privatePayrollPda: restartBuild.privatePayrollPda,
             permissionPda: restartBuild.permissionPda,
             teeAuthToken,
+            createReplacement,
             signatures,
           }),
         });
 
+        onProgress?.("Finalizing close");
         const finalizeJson = (await finalizeResponse.json()) as {
           error?: string;
           message?: string;
@@ -2592,18 +2902,25 @@ function EmployerPageContent() {
 
         if (!finalizeResponse.ok) {
           throw new Error(
-            finalizeJson.error || "Failed to finalize stopped-stream restart",
+            finalizeJson.error || "Failed to finalize stopped-stream cleanup",
           );
         }
 
         toast.success(
           finalizeJson.message ||
-          "Stopped stream reset complete. A fresh paused stream is ready.",
+          (createReplacement
+            ? "Cleanup complete. A fresh paused stream is ready."
+            : "Stream cleanup complete. This payroll stream is now closed."),
+        );
+        onProgress?.(
+          createReplacement
+            ? "Fresh paused stream is ready"
+            : "Stream cleanup complete",
         );
         await fetchPayrollConfig();
       } catch (err: unknown) {
         toast.error(
-          `Restart stream failed: ${err instanceof Error ? err.message : "Unknown"}`,
+          `${createReplacement ? "Create fresh stream" : "Close stream"} failed: ${err instanceof Error ? err.message : "Unknown"}`,
         );
       } finally {
         setRestartingStream(null);
@@ -2618,6 +2935,102 @@ function EmployerPageContent() {
       getTeeRpcUrl,
       waitForEmployeeOwnership,
       fetchPayrollConfig,
+      privateStates,
+      resolveStatusWithMissing,
+      missingPrivateStates,
+    ],
+  );
+
+  const handleCloseStream = useCallback(
+    async (stream: PayrollStream) => {
+      if (!walletAddress) {
+        toast.error("Connect your employer wallet first");
+        return;
+      }
+
+      setClosingStream(stream.id);
+      updateCloseProgress(stream.id, "Preparing close");
+      try {
+        let currentStream = stream;
+        let currentPreview = privateStates[currentStream.id] ?? null;
+        let currentStatus =
+          resolveStatusWithMissing(currentStream, currentPreview) ??
+          currentStream.status;
+        let currentMissingPrivateState = !!missingPrivateStates[currentStream.id];
+
+        if (currentStatus !== "stopped") {
+          updateCloseProgress(stream.id, "Moving stream into terminal close state");
+          await handleControlStream(currentStream, "stop", {
+            awaitCheckpointCleanup: true,
+          });
+          updateCloseProgress(stream.id, "Refreshing stopped state");
+          currentStream =
+            (await fetchLatestStreamForEmployee(stream.employeeId)) ?? currentStream;
+          currentPreview = privateStates[currentStream.id] ?? null;
+          currentStatus =
+            resolveStatusWithMissing(currentStream, currentPreview) ??
+            currentStream.status;
+          currentMissingPrivateState = !!missingPrivateStates[currentStream.id];
+        }
+
+        if (currentStatus !== "stopped") {
+          clearCloseProgress(stream.id);
+          toast.info(
+            "This stream is not stopped yet. Wait for the latest state sync, then try Close again.",
+          );
+          return;
+        }
+
+        updateCloseProgress(stream.id, "Checking remaining payroll");
+        const refreshedPreview = await fetchPrivatePreview(currentStream, {
+          silent: true,
+        });
+
+        if (refreshedPreview === "missing") {
+          clearCloseProgress(stream.id);
+          toast.success(
+            "This payroll stream is already fully closed. You can create a fresh stream any time.",
+          );
+          await fetchPayrollConfig();
+          return;
+        }
+
+        const stoppedLifecycle = deriveStoppedLifecycleState({
+          effectiveStatus: currentStatus,
+          preview: refreshedPreview || currentPreview,
+          hasMissingPrivateState: currentMissingPrivateState,
+        });
+
+        if (stoppedLifecycle.mustSettleBeforeClose) {
+          clearCloseProgress(stream.id);
+          toast.info(
+            "Close is blocked until the remaining payroll is settled. Settle the remaining amount first, then close the stream.",
+          );
+          return;
+        }
+
+        updateCloseProgress(stream.id, "Closing private payroll");
+        await handleRestartStoppedStream(currentStream, {
+          createReplacement: false,
+          onProgress: (message) => updateCloseProgress(stream.id, message),
+        });
+      } finally {
+        clearCloseProgress(stream.id);
+        setClosingStream(null);
+      }
+    },
+    [
+      walletAddress,
+      privateStates,
+      resolveStatusWithMissing,
+      missingPrivateStates,
+      handleControlStream,
+      fetchLatestStreamForEmployee,
+      fetchPrivatePreview,
+      fetchPayrollConfig,
+      handleRestartStoppedStream,
+      updateCloseProgress,
+      clearCloseProgress,
     ],
   );
 
@@ -2693,6 +3106,7 @@ function EmployerPageContent() {
             signTransaction,
             {
               sendTo: onboarding.transactions.baseSetup.sendTo,
+              rpcUrl: BASE_DEVNET_RPC_URL,
               signMessage,
               publicKey,
             },
@@ -2757,7 +3171,9 @@ function EmployerPageContent() {
         toast.success(
           onboarding.alreadyOnboarded
             ? "Stream is already onboarded to PER"
-            : "Stream onboarded to MagicBlock PER with employer wallet",
+            : onboarding.transactions.resumeStream
+              ? "Stream onboarded to MagicBlock PER and restored to active payroll."
+              : "Stream onboarded to MagicBlock PER. Resume when you want live accrual to start.",
         );
         await fetchPayrollConfig();
       } catch (err: unknown) {
@@ -2776,6 +3192,112 @@ function EmployerPageContent() {
       getOrFetchToken,
       getTeeRpcUrl,
       fetchPayrollConfig,
+    ],
+  );
+
+  const handleGoLive = useCallback(
+    async (
+      employee: ManagedEmployee,
+      stream: PayrollStream | null,
+      options?: { isOnboarded?: boolean; privateInitStatus?: PrivateInitStatus },
+    ) => {
+      if (!walletAddress) {
+        toast.error("Connect your employer wallet first");
+        return;
+      }
+
+      let currentStream = stream;
+      let currentPrivateInitStatus =
+        options?.privateInitStatus ?? resolvePrivateInitStatus(employee, stream);
+
+      if (!currentStream) {
+        await handleSaveDraftStream(employee);
+        currentStream = await fetchLatestStreamForEmployee(employee.id);
+        currentPrivateInitStatus = resolvePrivateInitStatus(employee, currentStream);
+      }
+
+      if (!currentStream) {
+        toast.info("Draft created. Review the stream once it appears, then click Go Live again.");
+        return;
+      }
+
+      let currentPreview = privateStates[currentStream.id] ?? null;
+      let currentStatus =
+        resolveStatusWithMissing(currentStream, currentPreview) ?? currentStream.status;
+      let currentMissingPrivateState = !!missingPrivateStates[currentStream.id];
+      let currentOnboarded =
+        options?.isOnboarded ??
+        Boolean(
+          !currentMissingPrivateState &&
+            currentStream.employeePda &&
+            currentStream.privatePayrollPda &&
+            currentStream.permissionPda &&
+            currentStream.delegatedAt,
+        );
+
+      if (currentStatus === "stopped") {
+        toast.info(
+          "Stopped streams must be fully closed first. Then you can create a fresh stream and go live again.",
+        );
+        return;
+      }
+
+      if (!currentOnboarded) {
+        await handleOnboardToPer(currentStream);
+        currentStream =
+          (await fetchLatestStreamForEmployee(employee.id)) ?? currentStream;
+        currentPreview = privateStates[currentStream.id] ?? null;
+        currentStatus =
+          resolveStatusWithMissing(currentStream, currentPreview) ??
+          currentStream.status;
+        currentMissingPrivateState = !!missingPrivateStates[currentStream.id];
+        currentOnboarded = Boolean(
+          !currentMissingPrivateState &&
+            currentStream.employeePda &&
+            currentStream.privatePayrollPda &&
+            currentStream.permissionPda &&
+            currentStream.delegatedAt,
+        );
+      }
+
+      if (!currentOnboarded) {
+        toast.info(
+          "PER setup is still finishing. Refresh once the employee shell and private payroll state are ready.",
+        );
+        return;
+      }
+
+      currentPrivateInitStatus = resolvePrivateInitStatus(employee, currentStream);
+      if (currentPrivateInitStatus !== "confirmed") {
+        toast.info(
+          currentPrivateInitStatus === "failed"
+            ? "The employee's private recipient setup failed. Ask them to open Claim > Withdraw and initialize it before going live."
+            : "The employee must initialize their private recipient before this stream can go live.",
+        );
+        return;
+      }
+
+      if (currentStatus === "active") {
+        toast.success("This payroll stream is already live.");
+        return;
+      }
+
+      if (currentStatus === "paused") {
+        await handleControlStream(currentStream, "resume");
+        return;
+      }
+
+      toast.info("This stream is not ready to go live yet. Refresh state and try again.");
+    },
+    [
+      walletAddress,
+      handleSaveDraftStream,
+      fetchLatestStreamForEmployee,
+      privateStates,
+      resolveStatusWithMissing,
+      missingPrivateStates,
+      handleOnboardToPer,
+      handleControlStream,
     ],
   );
 
@@ -2802,8 +3324,13 @@ function EmployerPageContent() {
 
       try {
         const teeAuthToken = await getOrFetchToken();
+        let streamEffectiveStatus: StreamStatus | null = null;
 
-        if (stream && getEffectiveStreamStatus(stream, privateStates[stream.id]) === "stopped") {
+        if (stream) {
+          let effectiveStatus = missingPrivateStates[stream.id]
+            ? "stopped"
+            : getEffectiveStreamStatus(stream, privateStates[stream.id]) ??
+              stream.status;
           const previewResult =
             (await fetchPrivatePreview(stream, { silent: true })) ??
             privateStates[stream.id] ??
@@ -2811,15 +3338,21 @@ function EmployerPageContent() {
 
           if (previewResult === "missing") {
             toast.info(
-              "This stopped stream no longer has a private payroll state in PER. There is nothing left to settle; use Restart Stream instead.",
+              "This stopped stream no longer has a private payroll state in PER. There is nothing left to settle; create a fresh stream if you want payroll to go live again.",
             );
             return;
           }
 
-          toast.info(
-            "Stopped streams cannot be settled with the current payroll instruction. Resume first if you need to settle more payroll.",
-          );
-          return;
+          effectiveStatus =
+            getEffectiveStreamStatus(stream, previewResult) ?? effectiveStatus;
+          streamEffectiveStatus = effectiveStatus;
+
+          if (effectiveStatus === "paused") {
+            toast.info(
+              "Paused streams cannot be settled with the current payroll instruction. Resume first if you need to settle more payroll.",
+            );
+            return;
+          }
         }
 
         const tickBuildResponse = await walletAuthenticatedFetch({
@@ -2877,6 +3410,23 @@ function EmployerPageContent() {
 
         if (tickBuild.processed === 0) {
           await fetchPayrollConfig();
+          if (stream && streamEffectiveStatus === "stopped") {
+            const refreshedPreview =
+              (await fetchPrivatePreview(stream, { silent: true })) ?? null;
+            const stoppedLifecycle = deriveStoppedLifecycleState({
+              effectiveStatus: "stopped",
+              preview: refreshedPreview === "missing" ? null : refreshedPreview,
+              hasMissingPrivateState: refreshedPreview === "missing",
+            });
+            toast.info(
+              stoppedLifecycle.phase === "fully_closed"
+                ? "This stream is already fully closed. Create a fresh stream if you want payroll to go live again."
+                : stoppedLifecycle.phase === "ready_to_close"
+                  ? "Remaining payroll is already settled. Close the stream to finish cleanup."
+                  : "No remaining payroll is available to settle right now.",
+            );
+            return;
+          }
           toast.info(
             stream
               ? "This stream is not active yet"
@@ -2898,6 +3448,23 @@ function EmployerPageContent() {
 
         if (actionableResults.length === 0) {
           await fetchPayrollConfig();
+          if (stream && streamEffectiveStatus === "stopped") {
+            const refreshedPreview =
+              (await fetchPrivatePreview(stream, { silent: true })) ?? null;
+            const stoppedLifecycle = deriveStoppedLifecycleState({
+              effectiveStatus: "stopped",
+              preview: refreshedPreview === "missing" ? null : refreshedPreview,
+              hasMissingPrivateState: refreshedPreview === "missing",
+            });
+            toast.info(
+              stoppedLifecycle.phase === "fully_closed"
+                ? "This stream is already fully closed. Create a fresh stream if you want payroll to go live again."
+                : stoppedLifecycle.phase === "ready_to_close"
+                  ? "Remaining payroll is already settled. Close the stream to finish cleanup."
+                  : "No remaining payroll is available to settle right now.",
+            );
+            return;
+          }
           const firstReason = tickBuild.results.find(
             (result) => result.reason,
           )?.reason;
@@ -3077,6 +3644,7 @@ function EmployerPageContent() {
       signMessage,
       getOrFetchToken,
       getTeeRpcUrl,
+      missingPrivateStates,
       privateStates,
       fetchPrivatePreview,
       fetchPayrollConfig,
@@ -3678,9 +4246,9 @@ function EmployerPageContent() {
                         stream?.permissionPda &&
                         stream?.delegatedAt
                       );
-                      const privateInitStatus = resolvePrivateInitStatus(
-                        {
-                          ...employee,
+      const privateInitStatus = resolvePrivateInitStatus(
+        {
+          ...employee,
                           privateRecipientInitializedAt:
                             employee.privateRecipientInitializedAt ??
                             employeeInitializedAtFromAnyStream,
@@ -3690,16 +4258,69 @@ function EmployerPageContent() {
                       const isRecipientPrivateReady =
                         privateInitStatus === "confirmed";
                       const privateInitBadge = getPrivateInitBadge(privateInitStatus);
-                      const previewAccruedMicro = Number(
-                        preview?.state.accruedUnpaidMicro ?? "0",
+                      const stoppedLifecycle = deriveStoppedLifecycleState({
+                        effectiveStatus,
+                        preview,
+                        hasMissingPrivateState,
+                      });
+                      const closeProgress = stream
+                        ? closeProgressByStream[stream.id] ?? null
+                        : null;
+                      const mustSettleBeforeClose =
+                        stoppedLifecycle.mustSettleBeforeClose;
+                      const isFullyClosed = stoppedLifecycle.isFullyClosed;
+                      const goLiveReadiness =
+                        !stream
+                          ? {
+                              label: "Draft missing",
+                              copy: "Create the draft stream first, then PER onboarding and recipient readiness can complete.",
+                            }
+                          : effectiveStatus === "stopped"
+                            ? {
+                                label: isFullyClosed
+                                  ? "Fresh stream required"
+                                  : mustSettleBeforeClose
+                                    ? "Close blocked"
+                                    : "Ready to close",
+                                copy: isFullyClosed
+                                  ? "This stream is fully closed. Create a fresh stream before payroll can go live again."
+                                  : mustSettleBeforeClose
+                                    ? "This stopped stream still has payroll left to settle. Settle the remaining amount first, then close the stream."
+                                    : "Remaining payroll is cleared. Close this stopped stream to finish final cleanup.",
+                              }
+                            : !isOnboarded
+                              ? {
+                                  label: "PER setup needed",
+                                  copy: "Create or re-onboard the employee shell and private payroll state inside MagicBlock PER.",
+                                }
+                              : !isRecipientPrivateReady
+                                ? {
+                                    label: "Employee init needed",
+                                    copy:
+                                      privateInitStatus === "failed"
+                                        ? "The employee must retry private recipient setup from Claim > Withdraw before this stream can go live."
+                                        : "The employee must initialize their private recipient before this stream can go live.",
+                                  }
+                                : effectiveStatus === "paused"
+                                  ? {
+                                      label: "Ready to go live",
+                                      copy: "Everything is staged correctly. Resume the stream to start live private accrual.",
+                                    }
+                                  : effectiveStatus === "active"
+                                    ? {
+                                        label: "Live now",
+                                        copy: "The stream is already live in MagicBlock PER and accruing privately.",
+                                      }
+                                    : {
+                                        label: "State syncing",
+                                        copy: "Refresh live state if this stream still looks out of sync.",
+                                      };
+                      const canShowCheckpointControl = !!(
+                        stream &&
+                        (effectiveStatus === "active" ||
+                          observedCheckpointStatus === "stale" ||
+                          stream.checkpointCrankStatus === "active")
                       );
-                      const hasAccruedToSettle =
-                        Number.isFinite(previewAccruedMicro) &&
-                        previewAccruedMicro > 0;
-                      const mustSettleBeforeRestart =
-                        effectiveStatus === "stopped" &&
-                        !hasMissingPrivateState &&
-                        (!preview || hasAccruedToSettle);
 
                       const statusAccent =
                         effectiveStatus === "active"
@@ -3821,7 +4442,7 @@ function EmployerPageContent() {
                           {/* Divider */}
                           <div className="h-px bg-[#111111] mx-5" />
 
-                          {/* Employee snapshot + PER preview grid */}
+                          {/* Employee snapshot + PER state grid */}
                           <div className="grid md:grid-cols-2 gap-4 px-5 py-4">
                             {/* Employee profile snapshot */}
                             <div>
@@ -3906,7 +4527,7 @@ function EmployerPageContent() {
                               </div>
                             </div>
 
-                            {/* PER preview panel */}
+                            {/* PER snapshot panel */}
                             <div>
                               <div className="flex items-center gap-1.5 mb-2">
                                 <ShieldCheck
@@ -3976,7 +4597,7 @@ function EmployerPageContent() {
                                   </div>
                                   <div className="flex items-center justify-between">
                                     <span className="text-[11px] text-[#a8a8aa] font-medium">
-                                      Preview fetched
+                                      Snapshot fetched
                                     </span>
                                     <span className="font-mono text-[11px] text-[#8f8f95]">
                                       {new Date(
@@ -4007,7 +4628,7 @@ function EmployerPageContent() {
                                   </div>
                                   {observedCheckpointStatus === "stale" ? (
                                     <p className="pt-2 text-[10px] text-amber-300">
-                                      Preview is refreshing, but the TEE accrual timestamp is not advancing.
+                                      Snapshot is refreshing, but the TEE accrual timestamp is not advancing.
                                       The scheduler is registered, but the actual checkpoint worker looks
                                       stalled. Use Restart Checkpoint Sync below.
                                     </p>
@@ -4034,7 +4655,13 @@ function EmployerPageContent() {
                                     This stream has no active private state in PER right now. Follow these steps to recover:
                                   </p>
                                   <ol className="text-[11px] text-red-300 font-medium space-y-1.5 list-decimal list-inside">
-                                    <li><strong>Save Draft</strong> → re-creates the stream</li>
+                                    <li>
+                                      <strong>{effectiveStatus === "stopped" ? "Create Fresh Stream" : "Save Draft"}</strong>
+                                      {" "}
+                                      → {effectiveStatus === "stopped"
+                                        ? "creates a fresh paused replacement stream"
+                                        : "re-creates the stream draft"}
+                                    </li>
                                     <li><strong>Onboard PER</strong> → re-initializes private state</li>
                                     <li><strong>Resume</strong> → activates the stream again</li>
                                   </ol>
@@ -4165,7 +4792,39 @@ function EmployerPageContent() {
 
                           {/* Action bar */}
                           <div className="flex flex-wrap items-center gap-2 px-5 py-4">
-                            {/* Save Draft / Create Draft / Restart Stream */}
+                            {effectiveStatus !== "stopped" ? (
+                              <button
+                                onClick={() =>
+                                  void handleGoLive(employee, stream, {
+                                    isOnboarded,
+                                    privateInitStatus,
+                                  })
+                                }
+                                disabled={
+                                  !walletAddress ||
+                                  savingStream === employee.id ||
+                                  restartingStream === stream?.id ||
+                                  closingStream === stream?.id ||
+                                  onboardingStream === stream?.id ||
+                                  controllingStream === stream?.id ||
+                                  effectiveStatus === "active"
+                                }
+                                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 text-[11px] font-bold transition-all disabled:opacity-50 uppercase tracking-wider shadow-sm"
+                              >
+                                {savingStream === employee.id ||
+                                restartingStream === stream?.id ||
+                                closingStream === stream?.id ||
+                                onboardingStream === stream?.id ||
+                                controllingStream === stream?.id ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <PlayCircle size={13} />
+                                )}
+                                {effectiveStatus === "active" ? "Live" : "Go Live"}
+                              </button>
+                            ) : null}
+
+                            {/* Save Draft / Create Draft / Create Fresh Stream */}
                             <button
                               onClick={() =>
                                 effectiveStatus === "stopped"
@@ -4177,12 +4836,20 @@ function EmployerPageContent() {
                                 !walletAddress ||
                                 savingStream === employee.id ||
                                 restartingStream === stream?.id ||
-                                mustSettleBeforeRestart
+                                closingStream === stream?.id ||
+                                (effectiveStatus === "stopped" && !isFullyClosed)
                               }
-                              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0f0f10] text-white hover:bg-black text-[11px] font-bold transition-all disabled:opacity-50 uppercase tracking-wider border border-white/10"
+                              className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-sm text-[11px] font-bold transition-all disabled:opacity-50 uppercase tracking-wider border ${
+                                effectiveStatus === "stopped"
+                                  ? isFullyClosed
+                                    ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20"
+                                    : "bg-[#0f0f10] border-white/10 text-[#7b7b82]"
+                                  : "bg-[#0f0f10] border-white/10 text-white hover:bg-black"
+                              }`}
                             >
                               {savingStream === employee.id ||
-                                restartingStream === stream?.id ? (
+                                restartingStream === stream?.id ||
+                                closingStream === stream?.id ? (
                                 <Loader2 size={13} className="animate-spin" />
                               ) : effectiveStatus === "stopped" ? (
                                 <RotateCcw size={13} />
@@ -4190,7 +4857,7 @@ function EmployerPageContent() {
                                 <Save size={13} />
                               )}
                               {effectiveStatus === "stopped"
-                                ? "Restart Stream"
+                                ? "Create Fresh Stream"
                                 : stream
                                   ? "Save Draft"
                                   : "Create Draft"}
@@ -4221,7 +4888,7 @@ function EmployerPageContent() {
                                 )}
                                 {settlingTickStream === stream.id ? "Syncing..." : "Sync Payroll State"}
                               </button>
-                            ) : stream && (
+                            ) : stream && (effectiveStatus !== "stopped" || mustSettleBeforeClose) && (
                               <>
                                 <div className="inline-flex items-center gap-2 rounded-sm border border-white/15 bg-[#0a0a0a] px-4 py-2">
                                   <input
@@ -4337,9 +5004,14 @@ function EmployerPageContent() {
                                     settlingTickStream !== null ||
                                     !isOnboarded ||
                                     !isRecipientPrivateReady ||
-                                    effectiveStatus === "stopped"
+                                    (effectiveStatus !== "active" &&
+                                      effectiveStatus !== "stopped")
                                   }
-                                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0f0f10] border border-white/10 text-white hover:bg-black text-[11px] font-bold transition-all disabled:opacity-60 shadow-sm uppercase tracking-wider"
+                                  className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-sm border text-[11px] font-bold transition-all disabled:opacity-60 shadow-sm uppercase tracking-wider ${
+                                    effectiveStatus === "stopped"
+                                      ? "bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20"
+                                      : "bg-[#0f0f10] border-white/10 text-white hover:bg-black"
+                                  }`}
                                 >
                                   {runningTickStream === stream.id ||
                                     settlingTickStream === stream.id ? (
@@ -4364,104 +5036,165 @@ function EmployerPageContent() {
                                       : effectiveStatus === "stopped" &&
                                         hasMissingPrivateState
                                         ? "No PER State"
+                                      : effectiveStatus === "paused"
+                                          ? "Paused"
                                         : effectiveStatus === "stopped"
-                                          ? "Stopped"
+                                          ? "Settle Remaining"
                                           : "Settle All"}
                                 </button>
                               </>
                             )}
 
                             {/* Onboard PER */}
-                            <button
-                              onClick={() =>
-                                stream && handleOnboardToPer(stream)
-                              }
-                              disabled={
-                                !walletAddress ||
-                                onboardingStream === stream?.id ||
-                                isOnboarded ||
-                                !stream
-                              }
-                              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0f0f10] border border-white/10 text-white hover:bg-black text-[11px] font-bold transition-all disabled:opacity-60 shadow-sm uppercase tracking-wider"
-                            >
-                              {onboardingStream === stream?.id ? (
-                                <Loader2 size={13} className="animate-spin" />
-                              ) : (
+                            {effectiveStatus !== "stopped" ? (
+                              <button
+                                onClick={() =>
+                                  stream && handleOnboardToPer(stream)
+                                }
+                                disabled={
+                                  !walletAddress ||
+                                  onboardingStream === stream?.id ||
+                                  isOnboarded ||
+                                  !stream
+                                }
+                                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0f0f10] border border-white/10 text-white hover:bg-black text-[11px] font-bold transition-all disabled:opacity-60 shadow-sm uppercase tracking-wider"
+                              >
+                                {onboardingStream === stream?.id ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <Sparkles size={13} />
+                                )}
+                                {isOnboarded ? "PER Onboarded" : "Onboard PER"}
+                              </button>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0f0f10] border border-white/10 text-white text-[11px] font-bold uppercase tracking-wider shadow-sm">
                                 <Sparkles size={13} />
-                              )}
-                              {isOnboarded ? "PER Onboarded" : "Onboard PER"}
-                            </button>
+                                PER Onboarded
+                              </span>
+                            )}
 
 
 
                             {/* Resume */}
-                            <button
-                              onClick={() =>
-                                stream &&
-                                handleControlStream(stream, "resume")
-                              }
-                              disabled={
-                                !walletAddress ||
-                                controllingStream === stream?.id ||
-                                !stream ||
-                                !isOnboarded ||
-                                effectiveStatus !== "paused"
-                              }
-                              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0a0a0a] border border-white/15 text-emerald-300 hover:bg-emerald-500/10 text-[11px] font-bold transition-all disabled:opacity-60 uppercase tracking-wider shadow-sm"
-                            >
-                              {controllingStream === stream?.id ? (
-                                <Loader2 size={13} className="animate-spin" />
-                              ) : (
-                                <PlayCircle size={13} />
-                              )}
-                              Resume
-                            </button>
+                            {effectiveStatus === "paused" ? (
+                              <button
+                                onClick={() =>
+                                  stream &&
+                                  handleControlStream(stream, "resume")
+                                }
+                                disabled={
+                                  !walletAddress ||
+                                  controllingStream === stream?.id ||
+                                  !stream ||
+                                  !isOnboarded ||
+                                  !isRecipientPrivateReady
+                                }
+                                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0a0a0a] border border-white/15 text-emerald-300 hover:bg-emerald-500/10 text-[11px] font-bold transition-all disabled:opacity-60 uppercase tracking-wider shadow-sm"
+                              >
+                                {controllingStream === stream?.id ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <PlayCircle size={13} />
+                                )}
+                                Resume
+                              </button>
+                            ) : null}
 
                             {/* Pause */}
-                            <button
-                              onClick={() =>
-                                stream && handleControlStream(stream, "pause")
-                              }
-                              disabled={
-                                !walletAddress ||
-                                controllingStream === stream?.id ||
-                                !stream ||
-                                !isOnboarded ||
-                                effectiveStatus !== "active"
-                              }
-                              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0a0a0a] border border-white/15 text-[#b6b6bc] hover:text-white hover:border-white/30 text-[11px] font-bold transition-all disabled:opacity-60 uppercase tracking-wider shadow-sm"
-                            >
-                              <Pause size={13} />
-                              Pause
-                            </button>
+                            {effectiveStatus === "active" ? (
+                              <button
+                                onClick={() =>
+                                  stream && handleControlStream(stream, "pause")
+                                }
+                                disabled={
+                                  !walletAddress ||
+                                  controllingStream === stream?.id ||
+                                  !stream ||
+                                  !isOnboarded
+                                }
+                                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0a0a0a] border border-white/15 text-[#b6b6bc] hover:text-white hover:border-white/30 text-[11px] font-bold transition-all disabled:opacity-60 uppercase tracking-wider shadow-sm"
+                              >
+                                <Pause size={13} />
+                                Pause
+                              </button>
+                            ) : null}
 
-                            {/* Stop */}
-                            <button
-                              onClick={() =>
-                                stream && handleControlStream(stream, "stop")
-                              }
-                              disabled={
-                                !walletAddress ||
-                                controllingStream === stream?.id ||
-                                !stream ||
-                                !isOnboarded ||
-                                effectiveStatus === "stopped"
-                              }
-                              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0a0a0a] border border-white/15 text-red-400 hover:bg-red-500/10 text-[11px] font-bold transition-all disabled:opacity-60 uppercase tracking-wider shadow-sm"
-                            >
-                              <Square size={13} />
-                              Stop
-                            </button>
+                            {/* Close */}
+                            {!isFullyClosed ? (
+                              <button
+                                onClick={() =>
+                                  stream && void handleCloseStream(stream)
+                                }
+                                disabled={
+                                  !walletAddress ||
+                                  closingStream === stream?.id ||
+                                  controllingStream === stream?.id ||
+                                  restartingStream === stream?.id ||
+                                  !stream ||
+                                  !isOnboarded ||
+                                  mustSettleBeforeClose
+                                }
+                                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0a0a0a] border border-white/15 text-red-400 hover:bg-red-500/10 text-[11px] font-bold transition-all disabled:opacity-60 uppercase tracking-wider shadow-sm"
+                              >
+                                {closingStream === stream?.id ? (
+                                  <Loader2 size={13} className="animate-spin" />
+                                ) : (
+                                  <Square size={13} />
+                                )}
+                                {closingStream === stream?.id
+                                  ? "Closing..."
+                                  : "Close Stream"}
+                              </button>
+                            ) : null}
 
 
                             {effectiveStatus === "stopped" ? (
                               <p className="w-full text-[10px] text-[#8f8f95] font-medium">
-                                Stopped on-chain. Cannot be resumed. Use Restart Stream to reset.
+                                {isFullyClosed
+                                  ? "This stream is fully closed. Create a fresh stream when you want this employee to go live again."
+                                  : mustSettleBeforeClose
+                                    ? "This stream is stopped, but not ready to close yet. Settle the remaining payroll first, then close the stream."
+                                    : "Remaining payroll is fully settled. Close this stream to finish PER/base cleanup."}
+                              </p>
+                            ) : isOnboarded && !isRecipientPrivateReady ? (
+                              <p className="w-full text-[10px] text-[#8f8f95] font-medium">
+                                {privateInitStatus === "failed"
+                                  ? "Employee private recipient setup failed. Ask them to open Claim > Withdraw and initialize again before resuming payroll."
+                                  : "Employee must initialize their private recipient before this stream can go live."}
+                              </p>
+                            ) : effectiveStatus === "paused" ? (
+                              <p className="w-full text-[10px] text-[#8f8f95] font-medium">
+                                Paused streams do not accrue or settle new payroll. Resume first to continue live accrual or settle more salary.
+                              </p>
+                            ) : null}
+
+                            <p className="w-full text-[10px] text-[#8f8f95] font-medium">
+                              {effectiveStatus === "stopped"
+                                ? "Close readiness: "
+                                : "Go Live readiness: "}
+                              <span className="font-bold uppercase text-white">
+                                {goLiveReadiness.label}
+                              </span>
+                              {" · "}
+                              {goLiveReadiness.copy}
+                            </p>
+
+                            {effectiveStatus === "stopped" &&
+                            !isFullyClosed &&
+                            !mustSettleBeforeClose ? (
+                              <p className="w-full text-[10px] text-emerald-300 font-medium">
+                                Remaining payroll is cleared. The only step left is to close this stream.
+                              </p>
+                            ) : null}
+
+                            {closingStream === stream?.id && closeProgress ? (
+                              <p className="w-full text-[10px] text-amber-300 font-medium">
+                                Close progress: {closeProgress}
                               </p>
                             ) : null}
 
                             {/* Refresh Preview */}
-                            {stream && (
+                            {canShowCheckpointControl ? (
                               <button
                                 onClick={() => {
                                   const observedCheckpointStatus =
@@ -4489,7 +5222,8 @@ function EmployerPageContent() {
                                   !walletAddress ||
                                   checkpointingStream === stream.id ||
                                   !isOnboarded ||
-                                  effectiveStatus === "stopped"
+                                  (effectiveStatus !== "active" &&
+                                    stream.checkpointCrankStatus !== "active")
                                 }
                                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-sm bg-[#0a0a0a] border border-white/15 text-[#b6b6bc] hover:text-white hover:border-white/30 text-[11px] font-bold transition-all disabled:opacity-60 uppercase tracking-wider shadow-sm"
                               >
@@ -4508,12 +5242,14 @@ function EmployerPageContent() {
                                       .lastAccrualTimestamp,
                                   nowMs,
                                 }) === "stale"
-                                  ? "Restart Checkpoint Sync"
+                                  ? effectiveStatus === "active"
+                                    ? "Restart Checkpoint Sync"
+                                    : "Stop Checkpoint Sync"
                                   : stream.checkpointCrankStatus === "active"
                                     ? "Stop Checkpoint Sync"
                                     : "Start Checkpoint Sync"}
                               </button>
-                            )}
+                            ) : null}
 
                             {stream && (
                               <button

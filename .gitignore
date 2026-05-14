@@ -44,5 +44,8 @@ next-env.d.ts
 scratch/
 payroll1-rust/scratch/
 payroll1-rust/keys/
+outputs/
+.fix-*.sh
 *.log
 ephemeral✓
+.env*.local
