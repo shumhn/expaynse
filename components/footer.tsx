@@ -149,7 +149,6 @@ export function Footer() {
       <footer className="bg-transparent py-16 px-4 sm:px-6 lg:px-8 border-t border-gray-200">
         <div className="max-w-7xl mx-auto">
           <div className="grid md:grid-cols-4 gap-12 mb-12">
-            {/* Brand */}
             <div className="md:col-span-2">
               <div className="flex items-center gap-2 mb-8">
                 <img src="/logo.png" alt="Expaynse" className="h-20 w-auto mix-blend-multiply" />
@@ -164,7 +163,6 @@ export function Footer() {
               </p>
             </div>
 
-            {/* Resources */}
             <div>
               <h4 className="text-black font-semibold mb-4">Product</h4>
               <ul className="space-y-3 list-none p-0 m-0">
@@ -203,7 +201,6 @@ export function Footer() {
               </ul>
             </div>
 
-            {/* Connect */}
             <div>
               <h4 className="text-black font-semibold mb-4">
                 Technology
@@ -217,7 +214,6 @@ export function Footer() {
             </div>
           </div>
 
-          {/* Bottom */}
           <div className="border-t border-gray-200 pt-8 flex flex-col md:flex-row justify-between items-center gap-4">
             <p className="text-sm text-gray-400">
               © {new Date().getFullYear()} Expaynse. Open source under MIT

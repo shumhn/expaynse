@@ -111,13 +111,11 @@ export function ConnectWalletBtn({
   return (
     <>
       <div className={`flex items-center gap-2.5 ${className}`}>
-        {/* ── Connected state ── */}
         {connected ? (
           <div
             className={`${isStandalone ? "block" : "hidden md:block"} relative z-50`}
             ref={dropdownRef}
           >
-            {/* Trigger button */}
             <button
               onClick={() => setAccountDropdownOpen(!accountDropdownOpen)}
               className="flex items-center gap-2 pl-2 pr-3 py-2 bg-white/5 border border-white/10 rounded-full hover:bg-white/10 transition-all duration-200 cursor-pointer shadow-sm"
@@ -146,13 +144,11 @@ export function ConnectWalletBtn({
               />
             </button>
 
-            {/* Account dropdown */}
             {accountDropdownOpen && (
               <div
                 className="absolute right-0 top-[calc(100%+10px)] w-60 rounded-2xl border border-white/10 bg-[#0a0a0a]/95 backdrop-blur-xl shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-150 origin-top-right z-[100]"
                 role="menu"
               >
-                {/* Panel header */}
                 <div className="flex flex-col items-center gap-3 px-4 pt-5 pb-4 bg-[#0a0a0a] border-b border-white/10">
                   <div className="flex items-center justify-center w-12 h-12 rounded-2xl overflow-hidden border border-white/10 shrink-0 bg-white/5">
                     {wallet?.adapter?.icon ? (
@@ -173,7 +169,6 @@ export function ConnectWalletBtn({
                       {wallet.adapter.name}
                     </span>
                   )}
-                  {/* Address copy row */}
                   <button
                     onClick={handleCopy}
                     aria-label="Copy address"
@@ -190,7 +185,6 @@ export function ConnectWalletBtn({
                   </button>
                 </div>
 
-                {/* Actions */}
                 <div className="p-2 bg-[#0a0a0a]">
                   <button
                     role="menuitem"
@@ -234,7 +228,6 @@ export function ConnectWalletBtn({
           </button>
         )}
 
-        {/* ── Mobile menu toggle ── */}
         {!isStandalone && (
           <button
             onClick={() => onMenuToggle?.(!menuOpen)}
@@ -247,7 +240,6 @@ export function ConnectWalletBtn({
         )}
       </div>
 
-      {/* ── Wallet selection modal (portaled to body) ── */}
       {walletModalOpen &&
         createPortal(
           <div
@@ -261,7 +253,6 @@ export function ConnectWalletBtn({
               aria-modal="true"
               aria-label="Connect Wallet"
             >
-              {/* Modal header */}
               <div className="flex items-center justify-between px-7 py-6 bg-[#0b0f14] border-b border-white/10">
                 <h2 className="text-base font-bold tracking-tight text-white">
                   Connect Wallet
@@ -275,7 +266,6 @@ export function ConnectWalletBtn({
                 </button>
               </div>
 
-              {/* Modal body */}
               <div className="p-4 max-h-[400px] overflow-y-auto [scrollbar-width:thin]">
                 {wallets.length === 0 ? (
                   <div className="flex flex-col items-center gap-3 py-12 px-6 text-center">
@@ -291,7 +281,6 @@ export function ConnectWalletBtn({
                   </div>
                 ) : (
                   <>
-                    {/* Installed wallets */}
                     {installedWallets.length > 0 && (
                       <div className="mb-4">
                         <p className="text-[10px] font-bold uppercase tracking-widest text-[#8f8f95] px-3 py-1.5 mb-1">
@@ -342,7 +331,6 @@ export function ConnectWalletBtn({
                       </div>
                     )}
 
-                    {/* Other wallets */}
                     {otherWallets.length > 0 && (
                       <div className="mt-2">
                         <p className="text-[10px] font-bold uppercase tracking-widest text-[#8f8f95] px-3 py-1.5 mb-1">
@@ -378,7 +366,6 @@ export function ConnectWalletBtn({
                 )}
               </div>
 
-              {/* Modal footer */}
               <div className="px-8 py-5 border-t border-white/10 text-center">
                 <p className="text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">
                   By connecting, you agree to the Terms

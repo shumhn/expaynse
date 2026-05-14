@@ -121,7 +121,6 @@ export function AppSidebar({
       className={`fixed lg:sticky top-0 left-0 z-50 h-screen w-72 bg-[#0a0a0a] border-r border-white/5 flex flex-col transition-transform duration-300 ${mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         }`}
     >
-      {/* Logo */}
       <Link href="/" className="h-16 flex items-center gap-3 px-5 border-b border-white/5 no-underline group">
         <Logo className="w-9 h-9 transition-transform group-hover:scale-110" />
         <span className="text-lg font-bold text-white tracking-tight">
@@ -130,7 +129,6 @@ export function AppSidebar({
       </Link>
 
       <div className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
-        {/* Workspace Tag */}
         <div className="px-2 mb-4">
           <div className="flex items-center justify-center gap-2 rounded-xl bg-white/5 border border-white/5 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.1em] text-[#a8a8aa]">
             {role === "employee" ? <UserCircle size={14} className="text-[#1eba98]" /> : <Briefcase size={14} className="text-[#1eba98]" />}
@@ -138,7 +136,6 @@ export function AppSidebar({
           </div>
         </div>
 
-        {/* Search */}
         <div className="px-2 mb-3">
           <div className="relative">
             <Search
@@ -158,7 +155,6 @@ export function AppSidebar({
           </div>
         </div>
 
-        {/* Nav Items */}
         <div className="space-y-0.5">
           {filteredItems.map((item) => {
             const isActive = pathname === item.href || (item.href !== "/" && pathname?.startsWith(`${item.href}/`));
@@ -194,7 +190,6 @@ export function AppSidebar({
         </div>
       </div>
 
-      {/* Bottom: Wallet */}
       <div className="p-3 border-t border-white/5">
         {connected && walletAddr ? (
           <div className="space-y-2">

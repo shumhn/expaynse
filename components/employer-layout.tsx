@@ -12,7 +12,6 @@ export function EmployerLayout({ children }: { children: ReactNode }) {
 
   return (
     <div className="h-screen bg-black flex overflow-hidden">
-      {/* Mobile overlay */}
       {mobileOpen && (
         <div
           className="fixed inset-0 bg-black/60 z-40 lg:hidden"
@@ -22,9 +21,7 @@ export function EmployerLayout({ children }: { children: ReactNode }) {
 
       <AppSidebar mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
 
-      {/* Main */}
       <div className="flex-1 min-w-0 flex flex-col h-screen">
-        {/* Top bar */}
         <header className="h-16 bg-[#0a0a0a] border-b border-white/5 flex items-center justify-between px-4 sm:px-6 shrink-0 z-30">
           <button
             onClick={() => setMobileOpen(true)}
@@ -37,7 +34,6 @@ export function EmployerLayout({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        {/* Content */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 overflow-y-auto bg-black">
           {!connected ? (
             <div className="h-[60vh] flex flex-col items-center justify-center">

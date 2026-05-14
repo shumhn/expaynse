@@ -54,7 +54,6 @@ export default function Appbar() {
       >
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
           <div className="flex items-center justify-between h-16">
-            {/* Logo */}
             <Link href="/" className="flex items-center gap-2.5 no-underline group">
               <Logo className="w-8 h-8" />
               <span className="text-lg font-bold text-white tracking-tight hidden sm:block">
@@ -62,7 +61,6 @@ export default function Appbar() {
               </span>
             </Link>
 
-            {/* Desktop Navigation */}
             <div className="hidden md:flex items-center gap-8">
               {tabsWithResolvedDashboard.map((tab) => {
                 const isActive = pathname?.startsWith(tab.href) ?? false;
@@ -82,12 +80,10 @@ export default function Appbar() {
               })}
             </div>
 
-            {/* CTA Buttons */}
             <div className="hidden md:flex items-center gap-3">
               <ConnectWalletBtn menuOpen={menuOpen} onMenuToggle={setMenuOpen} />
             </div>
 
-            {/* Mobile menu button */}
             <button
               className="md:hidden p-2 cursor-pointer"
               onClick={() => setMenuOpen(!menuOpen)}
@@ -100,7 +96,6 @@ export default function Appbar() {
             </button>
           </div>
 
-          {/* Mobile Navigation */}
           {menuOpen && (
             <div className="md:hidden py-4 border-t border-white/10 overflow-hidden">
               <div className="flex flex-col gap-2">
@@ -187,25 +182,21 @@ export default function Appbar() {
         </div>
       </nav>
 
-      {/* Wallet Selection Modal */}
       {walletModalOpen && !wallet.connected && (
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center px-4"
           onClick={() => setWalletModalOpen(false)}
         >
-          {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/40 backdrop-blur-sm"
             style={{ animation: "fadeIn 150ms ease-out" }}
           />
 
-          {/* Modal */}
           <div
             className="relative w-full max-w-sm rounded-2xl border border-white/10 bg-[#0a0a0a] shadow-xl overflow-hidden"
             onClick={(e) => e.stopPropagation()}
             style={{ animation: "fadeInUp 200ms ease-out" }}
           >
-            {/* Header */}
             <div className="flex items-center justify-between px-6 py-5 border-b border-white/10">
               <h2 className="font-bold text-white text-base">
                 Connect Wallet
@@ -218,7 +209,6 @@ export default function Appbar() {
               </button>
             </div>
 
-            {/* Wallet list */}
             <div className="p-4 max-h-[60vh] overflow-y-auto">
               {installedWallets.length > 0 && (
                 <div className="mb-6 text-left">
@@ -304,7 +294,6 @@ export default function Appbar() {
               )}
             </div>
 
-            {/* Footer */}
             <div className="px-6 py-6 border-t border-white/10 text-center">
               <p className="text-xs text-[#a8a8aa] uppercase tracking-widest font-bold">
                 By connecting, you agree to the Terms
@@ -314,7 +303,6 @@ export default function Appbar() {
         </div>
       )}
 
-      {/* Animations */}
       <style jsx>{`
         @keyframes fadeIn {
           from {
