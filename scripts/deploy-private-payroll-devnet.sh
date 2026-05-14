@@ -3,7 +3,7 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-WORKSPACE_DIR="$ROOT_DIR/payroll1-rust"
+WORKSPACE_DIR="$ROOT_DIR/contracts/payroll"
 IDL_PATH="$WORKSPACE_DIR/target/idl/payroll.json"
 PROGRAM_SO_PATH="$WORKSPACE_DIR/target/deploy/payroll.so"
 PROGRAM_KEYPAIR_PATH="$WORKSPACE_DIR/target/deploy/payroll-keypair.json"
