@@ -2,13 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import * as anchor from "@coral-xyz/anchor";
 import type { Idl } from "@coral-xyz/anchor";
 import BN from "bn.js";
-import {
-  clusterApiUrl,
-  Connection,
-  PublicKey,
-  SystemProgram,
-  Transaction,
-} from "@solana/web3.js";
+import { Connection, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import {
   createDelegatePermissionInstruction,
   PERMISSION_PROGRAM_ID,
@@ -16,13 +10,11 @@ import {
   permissionPdaFromAccount,
 } from "@magicblock-labs/ephemeral-rollups-sdk";
 
-import { createReadonlyAnchorWallet } from "@/lib/server/anchor-wallet";
 import {
   getEmployeeById,
   listStreams,
   updateStreamRuntimeState,
 } from "@/lib/server/payroll-store";
-import { loadPayrollIdl } from "@/lib/server/payroll-idl";
 import { findCompanyByEmployerWallet } from "@/lib/server/company-store";
 import {
   getEmployeePdaForStream,
@@ -36,160 +28,25 @@ import {
   isWalletAuthorizationError,
   verifyAuthorizedWalletRequest,
 } from "@/lib/wallet-request-auth";
-
-const PROGRAM_ID = new PublicKey(
-  "HoDcH6ocPxqHt5yEQGPAGrJZ9PgMp8LzU5gnEVBxNne6",
-);
-const DEVNET_TEE_VALIDATOR = new PublicKey(
-  "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo",
-);
-const BASE_DEVNET_RPC =
-  process.env.NEXT_PUBLIC_SOLANA_RPC_URL || clusterApiUrl("devnet");
-const BASE_DEVNET_RPC_FALLBACKS = Array.from(
-  new Set([BASE_DEVNET_RPC, clusterApiUrl("devnet")].filter(Boolean)),
-);
-const TEE_URL = "https://devnet-tee.magicblock.app";
-type BuildOnboardingBody = {
-  employerWallet?: string;
-  streamId?: string;
-  teeAuthToken?: string;
-};
-
-type BuildOnboardingResponse = {
-  employeePda: string;
-  privatePayrollPda: string;
-  permissionPda: string;
-  alreadyOnboarded?: boolean;
-  transactions: {
-    baseSetup?: {
-      transactionBase64: string;
-      sendTo: "base";
-    };
-    initializePrivatePayroll?: {
-      transactionBase64: string;
-      sendTo: "ephemeral";
-    };
-    resumeStream?: {
-      transactionBase64: string;
-      sendTo: "ephemeral";
-    };
-  };
-};
-
-const { AnchorProvider, Program } = anchor;
-
-function badRequest(message: string, status = 400) {
-  return NextResponse.json({ error: message }, { status });
-}
-
-function assertWallet(wallet: string, fieldName: string) {
-  const value = wallet.trim();
-  if (value.length < 32) {
-    throw new Error(`${fieldName} must be a valid wallet address`);
-  }
-  return value;
-}
-
-function toRateMicroUnits(ratePerSecond: number) {
-  if (!Number.isFinite(ratePerSecond) || ratePerSecond <= 0) {
-    throw new Error("ratePerSecond must be a positive number");
-  }
-
-  return Math.round(ratePerSecond * 1_000_000);
-}
-
-function isRpcRateLimitError(error: unknown) {
-  if (!(error instanceof Error)) return false;
-  const message = error.message.toLowerCase();
-  return message.includes("429") || message.includes("too many requests");
-}
-
-async function getLatestBlockhashWithRetry(connection: Connection) {
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    try {
-      return await connection.getLatestBlockhash("confirmed");
-    } catch (error: unknown) {
-      lastError = error;
-      if (!isRpcRateLimitError(error) || attempt === 3) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Failed to fetch recent blockhash");
-}
-
-async function getBaseProgramForEmployer(employerPubkey: PublicKey) {
-  const connection = new Connection(BASE_DEVNET_RPC, "confirmed");
-  const wallet = createReadonlyAnchorWallet(employerPubkey);
-  const provider = new AnchorProvider(connection, wallet, {
-    commitment: "confirmed",
-  });
-  const idl = await loadPayrollIdl(provider);
-  const program = new Program(idl, provider);
-  return { connection, provider, program };
-}
-
-async function getTeeProgramForEmployer(
-  employerPubkey: PublicKey,
-  teeAuthToken: string,
-) {
-  const connection = new Connection(
-    `${TEE_URL}?token=${encodeURIComponent(teeAuthToken)}`,
-    "confirmed",
-  );
-  const wallet = createReadonlyAnchorWallet(employerPubkey);
-  const provider = new AnchorProvider(connection, wallet, {
-    commitment: "confirmed",
-  });
-  const idl = await loadPayrollIdl(provider);
-  const program = new Program(idl, provider);
-  return { connection, provider, program };
-}
-
-async function serializeUnsignedTransaction(
-  connection: Connection,
-  feePayer: PublicKey,
-  transaction: Transaction,
-) {
-  const latest = await getLatestBlockhashWithRetry(connection);
-  transaction.recentBlockhash = latest.blockhash;
-  transaction.feePayer = feePayer;
-  return transaction.serialize({
-    requireAllSignatures: false,
-    verifySignatures: false,
-  });
-}
-
-async function getAccountInfo(connection: Connection, address: PublicKey) {
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    try {
-      return await connection.getAccountInfo(address, "confirmed");
-    } catch (error: unknown) {
-      lastError = error;
-      if (!isRpcRateLimitError(error) || attempt === 3) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Failed to load account info");
-}
-
-function isOwnedByProgram(
-  accountInfo: { owner: PublicKey } | null,
-  programId: PublicKey,
-) {
-  return Boolean(accountInfo && accountInfo.owner.equals(programId));
-}
+import {
+  assertWallet,
+  badRequest,
+  BASE_DEVNET_RPC,
+  DELEGATED_ACCOUNT_OWNER,
+  DEVNET_TEE_VALIDATOR,
+  DEVNET_USDC_MINT,
+  getAccountInfo,
+  getBaseProgramForEmployer,
+  getTeeProgramForEmployer,
+  isOwnedByProgram,
+  MAGIC_VAULT,
+  serializeUnsignedTransaction,
+  toRateMicroUnits,
+} from "./onboard-helpers";
+import type {
+  BuildOnboardingBody,
+  BuildOnboardingResponse,
+} from "./onboard-types";
 
 export async function POST(request: NextRequest) {
   try {
@@ -276,17 +133,18 @@ export async function POST(request: NextRequest) {
 
     const employeeExistsOnBase = Boolean(employeeAccountInfo);
 
-    // Check if already delegated by looking at account owner
-    const isDelegated =
-      employeeExistsOnBase &&
-      employeeAccountInfo!.owner.toBase58() === "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh";
+    // Delegation is inferred by account owner: delegated shells are owned by
+    // MagicBlock delegation runtime instead of the base program owner.
+    const isDelegated = isOwnedByProgram(
+      employeeAccountInfo,
+      DELEGATED_ACCOUNT_OWNER,
+    );
 
     const typedBaseProgram = baseProgram as anchor.Program<Idl>;
     const baseInstructions: anchor.web3.TransactionInstruction[] = [];
 
-    // 1. Create Employee (Base) — V2: only takes stream_id, no wallet
+    // Step 1 (base): create employee anchor if missing.
     if (!employeeExistsOnBase) {
-      console.log("  Building createEmployee instruction...");
       const createEmployeeIx = await typedBaseProgram.methods
         .createEmployee(streamSeedArg)
         .accounts({
@@ -298,9 +156,8 @@ export async function POST(request: NextRequest) {
       baseInstructions.push(createEmployeeIx);
     }
 
-    // 2. Create Permission (Base) — V2: sets up TEE access control
+    // Step 2 (base): create permission account for TEE-controlled execution.
     if (!employeeExistsOnBase) {
-      console.log("  Building createPermission instruction...");
       const permissionProgramId = new PublicKey("ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1");
       const createPermissionIx = await typedBaseProgram.methods
         .createPermission(streamSeedArg, new PublicKey(employee.wallet))
@@ -319,12 +176,13 @@ export async function POST(request: NextRequest) {
       baseConnection,
       permissionPda,
     );
-    const isPermissionDelegated = permissionAccountInfo ? permissionAccountInfo.owner.toBase58() === "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh" : false;
+    const isPermissionDelegated = isOwnedByProgram(
+      permissionAccountInfo,
+      DELEGATED_ACCOUNT_OWNER,
+    );
 
-    // 3. Delegate Employee (Base) — V2: teleports employee shell into TEE
+    // Step 3 (base): delegate employee shell into TEE runtime if not delegated.
     if (!isDelegated) {
-      console.log("  Building delegateEmployee instruction...");
-      
       if (!isPermissionDelegated) {
         const delegatePermissionIx = createDelegatePermissionInstruction({
           payer: employerPubkey,
@@ -346,7 +204,6 @@ export async function POST(request: NextRequest) {
       baseInstructions.push(delegateEmployeeIx);
     }
 
-    console.log(`  Base instructions built: ${baseInstructions.length}`);
     let baseSetupSerialized: Uint8Array | undefined;
     if (baseInstructions.length > 0) {
       baseSetupSerialized = await serializeUnsignedTransaction(
@@ -356,7 +213,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 4. Initialize Private Payroll (TEE) — V2: creates PrivatePayrollState inside the TEE
+    // Step 4 (TEE): initialize private payroll state if absent.
     let initPrivatePayrollSerialized: Uint8Array | undefined;
     const company = await findCompanyByEmployerWallet(employerWallet);
     if (!company) throw new Error("Company not found for employer");
@@ -369,13 +226,11 @@ export async function POST(request: NextRequest) {
     const isPrivatePayrollInitialized = teePrivatePayrollAccount !== null;
 
     if (!isPrivatePayrollInitialized) {
-      console.log("  Building initializePrivatePayroll instruction (TEE)...");
-      const MAGIC_VAULT = new PublicKey("MagicVau1t999999999999999999999999999999999");
       const initPrivatePayrollIx = await typedTeeProgram.methods
         .initializePrivatePayroll(
           new BN(rateMicroUnits),
           new PublicKey(employee.wallet),
-          new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"), // DEVNET_USDC
+          DEVNET_USDC_MINT,
           new PublicKey(company.treasuryPubkey),
           new PublicKey(company.settlementPubkey),
         )
@@ -398,7 +253,7 @@ export async function POST(request: NextRequest) {
     let isStreamActive = false;
     if (isPrivatePayrollInitialized && teePrivatePayrollAccount) {
       if (teePrivatePayrollAccount.data.length >= 193) {
-        // The status field is at offset 192 (6 * 32-byte Pubkeys/arrays)
+        // `status` lives at byte offset 192 in the serialized payroll state.
         isStreamActive = teePrivatePayrollAccount.data[192] === 1;
       }
     }
@@ -406,8 +261,6 @@ export async function POST(request: NextRequest) {
     let resumeStreamSerialized: Uint8Array | undefined;
     const shouldResumeDuringOnboarding = stream.status === "active";
     if (shouldResumeDuringOnboarding && !isStreamActive) {
-      console.log("  Building resumeStream instruction (TEE)...");
-      const MAGIC_VAULT = new PublicKey("MagicVau1t999999999999999999999999999999999");
       const resumeStreamIx = await typedTeeProgram.methods
         .resumeStream()
         .accounts({
