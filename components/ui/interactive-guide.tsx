@@ -36,6 +36,12 @@ interface InteractiveGuideProps {
   persistCompletion?: boolean;
 }
 
+interface GuideTargetReadyOptions {
+  enabled?: boolean;
+  retryIntervalMs?: number;
+  maxWaitMs?: number;
+}
+
 function buildGuideStorageKey(
   prefix: string,
   suffix: "completed" | "step",
@@ -76,55 +82,77 @@ export function InteractiveGuide({
   const progress = ((currentStep + 1) / steps.length) * 100;
 
   const updateTargetPosition = useCallback(() => {
-    if (!step) return;
+    if (!step) return false;
     const element = document.querySelector(step.target);
-    if (element) {
-      const rect = element.getBoundingClientRect();
-      setTargetRect(rect);
-
-      let x = 0, y = 0;
-      const tooltipWidth = 320;
-      const tooltipHeight = 180;
-      const offset = 16;
-
-      switch (step.position) {
-        case 'bottom':
-          x = rect.left + rect.width / 2 - tooltipWidth / 2;
-          y = rect.bottom + offset;
-          break;
-        case 'top':
-          x = rect.left + rect.width / 2 - tooltipWidth / 2;
-          y = rect.top - tooltipHeight - offset;
-          break;
-        case 'left':
-          x = rect.left - tooltipWidth - offset;
-          y = rect.top + rect.height / 2 - tooltipHeight / 2;
-          break;
-        case 'right':
-          x = rect.right + offset;
-          y = rect.top + rect.height / 2 - tooltipHeight / 2;
-          break;
-      }
-
-      x = Math.max(16, Math.min(x, window.innerWidth - tooltipWidth - 16));
-      y = Math.max(16, Math.min(y, window.innerHeight - tooltipHeight - 16));
-
-      setTooltipPosition({ x, y });
+    if (!element) {
+      setTargetRect(null);
+      return false;
     }
+
+    const rect = element.getBoundingClientRect();
+    setTargetRect(rect);
+
+    let x = 0, y = 0;
+    const tooltipWidth = 320;
+    const tooltipHeight = 180;
+    const offset = 16;
+
+    switch (step.position) {
+      case 'bottom':
+        x = rect.left + rect.width / 2 - tooltipWidth / 2;
+        y = rect.bottom + offset;
+        break;
+      case 'top':
+        x = rect.left + rect.width / 2 - tooltipWidth / 2;
+        y = rect.top - tooltipHeight - offset;
+        break;
+      case 'left':
+        x = rect.left - tooltipWidth - offset;
+        y = rect.top + rect.height / 2 - tooltipHeight / 2;
+        break;
+      case 'right':
+        x = rect.right + offset;
+        y = rect.top + rect.height / 2 - tooltipHeight / 2;
+        break;
+    }
+
+    x = Math.max(16, Math.min(x, window.innerWidth - tooltipWidth - 16));
+    y = Math.max(16, Math.min(y, window.innerHeight - tooltipHeight - 16));
+
+    setTooltipPosition({ x, y });
+    return true;
   }, [step]);
 
   useEffect(() => {
-    if (isOpen) {
-      const frame = window.requestAnimationFrame(updateTargetPosition);
-      window.addEventListener('resize', updateTargetPosition);
-      window.addEventListener('scroll', updateTargetPosition);
-      localStorage.setItem(stepKey, currentStep.toString());
-      return () => {
-        window.cancelAnimationFrame(frame);
-        window.removeEventListener('resize', updateTargetPosition);
-        window.removeEventListener('scroll', updateTargetPosition);
-      };
+    if (!isOpen) {
+      setTargetRect(null);
+      return;
     }
+
+    let active = true;
+    let frame = 0;
+    const startedAt = window.performance.now();
+
+    const syncPosition = () => {
+      if (!active) return;
+      const found = updateTargetPosition();
+      if (found) return;
+
+      if (window.performance.now() - startedAt < 2500) {
+        frame = window.requestAnimationFrame(syncPosition);
+      }
+    };
+
+    frame = window.requestAnimationFrame(syncPosition);
+    window.addEventListener('resize', updateTargetPosition);
+    window.addEventListener('scroll', updateTargetPosition, true);
+    localStorage.setItem(stepKey, currentStep.toString());
+    return () => {
+      active = false;
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('resize', updateTargetPosition);
+      window.removeEventListener('scroll', updateTargetPosition, true);
+    };
   }, [isOpen, currentStep, stepKey, updateTargetPosition]);
 
   const handleNext = () => {
@@ -359,4 +387,76 @@ export function useGuideStatus(
   };
 
   return { hasCompleted, resetGuide };
+}
+
+export function useGuideTargetReady(
+  selector: string | undefined,
+  {
+    enabled = true,
+    retryIntervalMs = 90,
+    maxWaitMs = 2500,
+  }: GuideTargetReadyOptions = {},
+) {
+  const [isReady, setIsReady] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!enabled || !selector) {
+      setIsReady(false);
+      return;
+    }
+
+    let active = true;
+    let intervalId: number | null = null;
+    let timeoutId: number | null = null;
+    let observer: MutationObserver | null = null;
+
+    const check = () => {
+      if (!active) return false;
+      const found = !!document.querySelector(selector);
+      if (found) {
+        setIsReady(true);
+      }
+      return found;
+    };
+
+    setIsReady(check());
+    if (document.querySelector(selector)) {
+      return;
+    }
+
+    const stop = () => {
+      if (intervalId !== null) window.clearInterval(intervalId);
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      observer?.disconnect();
+    };
+
+    intervalId = window.setInterval(() => {
+      if (check()) {
+        stop();
+      }
+    }, retryIntervalMs);
+
+    observer = new MutationObserver(() => {
+      if (check()) {
+        stop();
+      }
+    });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+    });
+
+    timeoutId = window.setTimeout(() => {
+      stop();
+    }, maxWaitMs);
+
+    return () => {
+      active = false;
+      stop();
+    };
+  }, [enabled, selector, retryIntervalMs, maxWaitMs]);
+
+  return isReady;
 }

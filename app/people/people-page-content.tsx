@@ -44,6 +44,7 @@ import {
   InteractiveGuide,
   type GuideStep,
   useGuideStatus,
+  useGuideTargetReady,
 } from "@/components/ui/interactive-guide";
 
 const PEOPLE_ONBOARDING_HANDOFF_KEY = "expaynse:people-onboarding-handoff";
@@ -314,6 +315,10 @@ export default function PeoplePage() {
     "payroll-modes",
     payrollGuideScope,
   );
+  const firstPayrollGuideTarget = PAYROLL_MODE_GUIDE_STEPS[0]?.target;
+  const isPayrollGuideTargetReady = useGuideTargetReady(firstPayrollGuideTarget, {
+    enabled: showAdd && !hasCompletedPayrollGuide && !hasShownPayrollGuide,
+  });
   const [streamModalEmployee, setStreamModalEmployee] = useState<Employee | null>(null);
   const [streamSalaryInput, setStreamSalaryInput] = useState("");
   const [startingStream, setStartingStream] = useState(false);
@@ -325,17 +330,28 @@ export default function PeoplePage() {
   }, []);
 
   useEffect(() => {
-    if (!showAdd || hasCompletedPayrollGuide || hasShownPayrollGuide) {
+    if (
+      !showAdd ||
+      hasCompletedPayrollGuide ||
+      hasShownPayrollGuide ||
+      !isPayrollGuideTargetReady
+    ) {
       return;
     }
 
-    const timer = window.setTimeout(() => {
+    const frame = window.requestAnimationFrame(() => {
       setPayrollGuideOpenForWallet(walletAddr ?? null);
       setHasShownPayrollGuideForWallet(walletAddr ?? null);
-    }, 180);
+    });
 
-    return () => window.clearTimeout(timer);
-  }, [showAdd, hasCompletedPayrollGuide, hasShownPayrollGuide, walletAddr]);
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    showAdd,
+    hasCompletedPayrollGuide,
+    hasShownPayrollGuide,
+    walletAddr,
+    isPayrollGuideTargetReady,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

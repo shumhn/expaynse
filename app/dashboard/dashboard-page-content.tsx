@@ -32,6 +32,7 @@ import {
   InteractiveGuide,
   type GuideStep,
   useGuideStatus,
+  useGuideTargetReady,
 } from "@/components/ui/interactive-guide";
 import { getBalance } from "@/lib/magicblock-api";
 
@@ -237,6 +238,14 @@ export default function DashboardPage() {
     "dashboard-onboarding",
     dashboardGuideScope,
   );
+  const firstDashboardGuideTarget = (company ? ACTIVE_COMPANY_STEPS : FIRST_TIME_SETUP_STEPS)[0]?.target;
+  const isDashboardGuideTargetReady = useGuideTargetReady(firstDashboardGuideTarget, {
+    enabled:
+      connected &&
+      !!walletAddr &&
+      !hasCompletedDashboardGuide &&
+      !hasShownDashboardGuide,
+  });
 
   const companyRef = useRef(company);
   const devnetFundsRef = useRef<HTMLDivElement | null>(null);
@@ -389,25 +398,30 @@ export default function DashboardPage() {
   useEffect(() => {
     const shouldBlockFromCompletion = hasCompletedDashboardGuide;
 
-    if (!connected || !walletAddr || loading || shouldBlockFromCompletion || hasShownDashboardGuide) {
+    if (
+      !connected ||
+      !walletAddr ||
+      shouldBlockFromCompletion ||
+      hasShownDashboardGuide ||
+      !isDashboardGuideTargetReady
+    ) {
       return;
     }
 
-    const timer = window.setTimeout(() => {
+    const frame = window.requestAnimationFrame(() => {
       setDashboardGuideOpenForWallet(walletAddr);
       setHasShownDashboardGuideForWallet(walletAddr);
-    }, 220);
+    });
 
-    return () => window.clearTimeout(timer);
+    return () => window.cancelAnimationFrame(frame);
   }, [
     connected,
     dashboardGuideOpenForWallet,
     hasShownDashboardGuideForWallet,
     walletAddr,
-    loading,
-    company,
     hasCompletedDashboardGuide,
     hasShownDashboardGuide,
+    isDashboardGuideTargetReady,
   ]);
 
 
