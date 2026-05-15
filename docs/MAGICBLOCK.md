@@ -12,6 +12,10 @@ Expaynse uses MagicBlock as the real-time execution layer for private payroll.
   Operational devnet scripts for onboarding, crank simulation, transfer testing, verifier flows, and deploy/IDL repair helpers under `scripts/payroll/devnet/`.
 - `tests/payroll/`
   End-to-end devnet tests that exercise the delegated payroll lifecycle.
+- `tests/app/payroll-end-to-end.e2e.ts`
+  Canonical application-layer payroll flow that exercises the web routes around onboarding, accrual, tick, and settlement.
+- `tests/app/payroll-realtime.e2e.ts`
+  Canonical realtime payroll flow that proves autonomous checkpoint accrual progresses and stops correctly for employer and employee actors.
 - `lib/magicblock-api.ts`
   App-side helpers for private payment API calls and settlement flows.
 
@@ -21,7 +25,7 @@ Expaynse uses MagicBlock as the real-time execution layer for private payroll.
 2. Open `programs/payroll/Cargo.toml` to see the MagicBlock crates wired into the program.
 3. Open `programs/payroll/src/lib.rs` for the on-chain payroll lifecycle.
 4. Inspect `scripts/payroll/onboard-employee.ts` and `scripts/payroll/crank.ts` for operational MagicBlock flows.
-5. Run `npm run payroll:magicblock:health` or `npm run payroll:verify:devnet` with the required environment variables.
+5. Run `npm run payroll:magicblock:health`, `npm run payroll:verify:devnet`, `npm run test:app:e2e`, or `npm run test:app:realtime` with the required environment variables.
 
 ## Why This Structure
 

@@ -271,12 +271,26 @@ export function resolveGoLiveReadiness(args: {
   }
 
   if (!args.isRecipientPrivateReady) {
+    if (args.privateInitStatus === "failed") {
+      return {
+        label: "Recipient setup failed",
+        copy:
+          "Server auto-init did not complete. Ask the employee to retry private recipient setup from Claim > Withdraw before this stream can go live.",
+      };
+    }
+
+    if (args.privateInitStatus === "processing") {
+      return {
+        label: "Recipient setup in progress",
+        copy:
+          "Server auto-init is still running for this employee. Wait for it to finish, or use Claim > Withdraw if manual recovery becomes necessary.",
+      };
+    }
+
     return {
-      label: "Employee init needed",
+      label: "Recipient setup needed",
       copy:
-        args.privateInitStatus === "failed"
-          ? "The employee must retry private recipient setup from Claim > Withdraw before this stream can go live."
-          : "The employee must initialize their private recipient before this stream can go live.",
+        "Server auto-init has not completed yet. Finish private recipient setup before this stream can go live, and use Claim > Withdraw if manual completion is needed.",
     };
   }
 

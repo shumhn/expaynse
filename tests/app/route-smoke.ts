@@ -20,12 +20,16 @@ import {
   PATCH as employeePrivateInitFinalizePatch,
   POST as employeePrivateInitBuildPost,
 } from "../../app/api/employee-private-init/route.ts";
+import {
+  GET as claimRequestGet,
+  PATCH as claimRequestFinalizePatch,
+  POST as claimRequestBuildPost,
+} from "../../app/api/claim-salary/request/route.ts";
+import { POST as claimProcessPost } from "../../app/api/claim-salary/process/route.ts";
+import { POST as companyCreatePost } from "../../app/api/company/create/route.ts";
+import { POST as employeesAutoInitPost } from "../../app/api/employees/auto-init/route.ts";
 import { POST as employeesPost } from "../../app/api/employees/route.ts";
 import { GET as previewGet } from "../../app/api/payroll/preview/route.ts";
-import {
-  PATCH as tickFinalizePatch,
-  POST as tickBuildPost,
-} from "../../app/api/payroll/tick/route.ts";
 import {
   PATCH as checkpointCrankFinalizePatch,
   POST as checkpointCrankBuildPost,
@@ -40,14 +44,23 @@ import {
 } from "../../app/api/streams/onboard/route.ts";
 import { POST as streamsPost } from "../../app/api/streams/route.ts";
 import {
+  buildPrivateTransfer,
   deposit,
   fetchTeeAuthToken,
   getBalance,
   getPrivateBalance,
   signAndSend,
 } from "../../lib/magicblock-api.ts";
-import { getStreamById } from "../../lib/server/payroll-store.ts";
-import { makeAuthenticatedJsonRequest } from "../helpers/wallet-auth-test-helpers.ts";
+import { getPayrollStore, getStreamById } from "../../lib/server/payroll-store.ts";
+import { loadCompanyKeypair } from "../../lib/server/company-key-vault.ts";
+import {
+  makeAuthenticatedGetRequest,
+  makeAuthenticatedJsonRequest,
+} from "../helpers/wallet-auth-test-helpers.ts";
+import {
+  fundBaseUsdcIfNeeded,
+  fundPrivateUsdcIfNeeded,
+} from "../helpers/devnet-funding.ts";
 
 const DEFAULT_WALLET_PATH =
   "/Users/sumangiri/Desktop/Homie/keys/payroll-authority.json";
@@ -88,6 +101,64 @@ type EmployeePrivateInitFinalizeResponse = {
     balance: string;
     location: "base" | "ephemeral";
   } | null;
+};
+
+type EmployeeAutoInitResponse = {
+  message?: string;
+  employee?: {
+    id: string;
+    wallet: string;
+    privateRecipientInitStatus?: string | null;
+    privateRecipientInitializedAt?: string | null;
+    privateRecipientInitError?: string | null;
+  };
+  error?: string;
+};
+
+type ClaimRequestBuildResponse = {
+  employeeWallet: string;
+  streamId: string;
+  amountMicro: number;
+  claimId: number;
+  transactions: {
+    requestWithdrawal: SendSpec;
+  };
+  error?: string;
+};
+
+type ClaimRequestFinalizeResponse = {
+  message?: string;
+  claim?: {
+    id: string;
+    streamId: string;
+    claimId: number;
+    amountMicro: number;
+    status: string;
+  };
+  error?: string;
+};
+
+type ClaimProcessResponse = {
+  message?: string;
+  claim?: {
+    id: string;
+    status: string;
+    paymentTxSignature?: string | null;
+    markPaidTxSignature?: string | null;
+  };
+  error?: string;
+};
+
+type CompanyCreateResponse = {
+  ok?: boolean;
+  company?: {
+    id: string;
+    name: string;
+    employerWallet: string;
+    treasuryPubkey: string;
+    settlementPubkey: string;
+  };
+  error?: string;
 };
 
 type ControlAction = "update-rate" | "pause" | "resume" | "stop";
@@ -134,8 +205,9 @@ type TickBuildResponse = {
     amountMicro?: number;
     employeePda?: string;
     privatePayrollPda?: string;
+    transferSignature?: string;
+    transferSendTo?: string;
     transactions?: {
-      transfer?: SendSpec;
       settleSalary?: SendSpec;
       commitEmployee?: SendSpec;
     };
@@ -281,73 +353,10 @@ async function fundEmployeeUsdcIfNeeded(args: {
   recipient: PublicKey;
   minAmountMicro: bigint;
 }) {
-  const recipientWallet = args.recipient.toBase58();
-  const current = await getBalance(recipientWallet);
-  const currentMicro = BigInt(current.balance);
-
-  if (currentMicro >= args.minAmountMicro) {
-    return currentMicro;
-  }
-
-  const mint = new PublicKey(DEVNET_USDC);
-  const payerAta = await getOrCreateAssociatedTokenAccount(
-    args.connection,
-    args.payer,
-    mint,
-    args.payer.publicKey
-  );
-  const recipientAta = await getOrCreateAssociatedTokenAccount(
-    args.connection,
-    args.payer,
-    mint,
-    args.recipient
-  );
-
-  const deltaMicro = args.minAmountMicro - currentMicro;
-  if (deltaMicro > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(
-      "Requested employee USDC top-up exceeds safe integer range"
-    );
-  }
-
-  console.log(
-    `Funding ${recipientWallet} with ${toUiAmount(deltaMicro).toFixed(
-      6
-    )} base USDC for private init precondition`
-  );
-
-  const latest = await args.connection.getLatestBlockhash("confirmed");
-  const tx = new Transaction({
-    feePayer: args.payer.publicKey,
-    recentBlockhash: latest.blockhash,
-  }).add(
-    createTransferInstruction(
-      payerAta.address,
-      recipientAta.address,
-      args.payer.publicKey,
-      Number(deltaMicro)
-    )
-  );
-
-  tx.sign(args.payer);
-
-  const signature = await args.connection.sendRawTransaction(tx.serialize(), {
-    skipPreflight: false,
+  return fundBaseUsdcIfNeeded({
+    ...args,
+    label: args.recipient.toBase58(),
   });
-
-  await args.connection.confirmTransaction(
-    {
-      signature,
-      blockhash: latest.blockhash,
-      lastValidBlockHeight: latest.lastValidBlockHeight,
-    },
-    "confirmed"
-  );
-
-  console.log("Employee base USDC top-up signature:", signature);
-
-  const next = await getBalance(recipientWallet);
-  return BigInt(next.balance);
 }
 
 function employerSignTransactionFactory(signer: Keypair) {
@@ -424,19 +433,19 @@ async function waitForPrivateBalanceAtLeast(args: {
   );
 }
 
-async function fundEmployerPrivateUsdcIfNeeded(args: {
-  employerWallet: string;
-  employerTeeAuthToken: string;
+async function fundWalletPrivateUsdcIfNeeded(args: {
+  connection: Connection;
+  payer: Keypair;
+  ownerWallet: string;
+  ownerTeeAuthToken: string;
   signer: Keypair;
   minAmountMicro: bigint;
+  label: string;
 }) {
-  const current = await getPrivateBalance(
-    args.employerWallet,
-    args.employerTeeAuthToken
-  );
+  const current = await getPrivateBalance(args.ownerWallet, args.ownerTeeAuthToken);
   const currentMicro = BigInt(current.balance);
 
-  console.log("Employer private balance before settlement:", {
+  console.log(`${args.label} private balance before settlement:`, {
     location: current.location,
     balance: current.balance,
   });
@@ -449,34 +458,56 @@ async function fundEmployerPrivateUsdcIfNeeded(args: {
   const topUpMicro = shortfallMicro + 100_000n;
   const topUpUiAmount = toUiAmount(topUpMicro);
 
+  await fundAccountIfNeeded({
+    connection: args.connection,
+    payer: args.payer,
+    recipient: args.signer.publicKey,
+    minLamports: 50_000_000,
+  });
+  await fundEmployeeUsdcIfNeeded({
+    connection: args.connection,
+    payer: args.payer,
+    recipient: args.signer.publicKey,
+    minAmountMicro: topUpMicro,
+  });
+
   console.log(
-    `Funding employer private balance with ${topUpUiAmount.toFixed(
+    `Funding ${args.label} private balance with ${topUpUiAmount.toFixed(
       6
     )} USDC for settlement transfer precondition`
   );
 
-  const depositBuild = await deposit(args.employerWallet, topUpUiAmount);
-  if (!depositBuild.transactionBase64) {
+  const transferBuild = await buildPrivateTransfer({
+    from: args.signer.publicKey.toBase58(),
+    to: args.ownerWallet,
+    amount: topUpUiAmount,
+    outputMint: DEVNET_USDC,
+    balances: {
+      fromBalance: "base",
+      toBalance: "ephemeral",
+    },
+  });
+  if (!transferBuild.transactionBase64) {
     throw new Error(
-      "Employer private top-up deposit did not return a transaction"
+      `${args.label} private top-up transfer did not return a transaction`
     );
   }
 
   const depositSignature = await sendBuiltTransaction({
     spec: {
-      transactionBase64: depositBuild.transactionBase64,
-      sendTo: depositBuild.sendTo || "base",
+      transactionBase64: transferBuild.transactionBase64,
+      sendTo: transferBuild.sendTo || "base",
     },
     signer: args.signer,
-    signerLabel: "employer:privateTopUp",
+    signerLabel: `${args.label}:privateTopUp`,
   });
 
-  console.log("Employer private top-up signature:", depositSignature);
+  console.log(`${args.label} private top-up signature:`, depositSignature);
 
   return waitForPrivateBalanceAtLeast({
-    label: "employer-private-balance",
-    address: args.employerWallet,
-    token: args.employerTeeAuthToken,
+    label: `${args.label}-private-balance`,
+    address: args.ownerWallet,
+    token: args.ownerTeeAuthToken,
     minMicro: args.minAmountMicro,
   });
 }
@@ -506,21 +537,14 @@ async function buildControlAndFinalize(args: {
     buildResponse
   );
   assert(
-    buildJson.transactions?.control && buildJson.transactions?.commitEmployee,
-    buildJson.error || `${args.action} build missing transactions`
+    buildJson.transactions?.control,
+    buildJson.error || `${args.action} build missing control transaction`
   );
 
   const controlSignature = await sendBuiltTransaction({
     spec: buildJson.transactions.control,
     signer: args.signer,
     signerLabel: `${args.action}:control`,
-    teeAuthToken: args.teeAuthToken,
-    useTeeRpc: true,
-  });
-  const commitSignature = await sendBuiltTransaction({
-    spec: buildJson.transactions.commitEmployee,
-    signer: args.signer,
-    signerLabel: `${args.action}:commit`,
     teeAuthToken: args.teeAuthToken,
     useTeeRpc: true,
   });
@@ -535,7 +559,6 @@ async function buildControlAndFinalize(args: {
         employeePda: buildJson.employeePda,
         privatePayrollPda: buildJson.privatePayrollPda,
         controlSignature,
-        commitSignature,
       },
       "PATCH"
     )
@@ -563,11 +586,16 @@ async function buildCheckpointCrankAndFinalize(args: {
   mode: CheckpointCrankMode;
 }) {
   const buildResponse = await checkpointCrankBuildPost(
-    makeJsonRequest("http://localhost/api/streams/checkpoint-crank", {
-      employerWallet: args.employerWallet,
-      streamId: args.streamId,
-      teeAuthToken: args.teeAuthToken,
-      mode: args.mode,
+    await makeAuthenticatedJsonRequest({
+      url: "http://localhost/api/streams/checkpoint-crank",
+      wallet: args.employerWallet,
+      signer: args.signer,
+      body: {
+        employerWallet: args.employerWallet,
+        streamId: args.streamId,
+        teeAuthToken: args.teeAuthToken,
+        mode: args.mode,
+      },
     })
   );
   assert.strictEqual(
@@ -593,9 +621,11 @@ async function buildCheckpointCrankAndFinalize(args: {
   });
 
   const finalizeResponse = await checkpointCrankFinalizePatch(
-    makeJsonRequest(
-      "http://localhost/api/streams/checkpoint-crank",
-      {
+    await makeAuthenticatedJsonRequest({
+      url: "http://localhost/api/streams/checkpoint-crank",
+      wallet: args.employerWallet,
+      signer: args.signer,
+      body: {
         employerWallet: args.employerWallet,
         streamId: args.streamId,
         mode: args.mode,
@@ -603,8 +633,8 @@ async function buildCheckpointCrankAndFinalize(args: {
         signature,
         status: args.mode === "schedule" ? "active" : "stopped",
       },
-      "PATCH"
-    )
+      method: "PATCH",
+    })
   );
   assert.strictEqual(
     finalizeResponse.status,
@@ -619,61 +649,6 @@ async function buildCheckpointCrankAndFinalize(args: {
     };
     error?: string;
   }>(finalizeResponse);
-}
-
-async function waitForSettlementBuild(args: {
-  employerWallet: string;
-  employerTeeAuthToken: string;
-  streamId: string;
-  attempts?: number;
-  delayMs?: number;
-}) {
-  const attempts = args.attempts ?? 10;
-  const delayMs = args.delayMs ?? 1500;
-
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const response = await tickBuildPost(
-      makeJsonRequest("http://localhost/api/payroll/tick", {
-        employerWallet: args.employerWallet,
-        teeAuthToken: args.employerTeeAuthToken,
-        streamId: args.streamId,
-      })
-    );
-    assert.strictEqual(response.status, 200, "Tick build should return 200");
-
-    const jsonBody = await json<TickBuildResponse & { error?: string }>(
-      response
-    );
-    const streamResult = jsonBody.results.find(
-      (result) => result.streamId === args.streamId
-    );
-    assert(streamResult, "Tick build should include the created stream");
-
-    if (
-      !streamResult.skipped &&
-      typeof streamResult.amountMicro === "number" &&
-      streamResult.amountMicro > 0 &&
-      streamResult.transactions?.transfer &&
-      streamResult.transactions?.settleSalary &&
-      streamResult.transactions?.commitEmployee
-    ) {
-      return streamResult;
-    }
-
-    console.log(
-      `[poll:settlement-build] ${attempt}/${attempts} skipped=${
-        streamResult.skipped
-      } reason=${streamResult.reason ?? "none"}`
-    );
-
-    if (attempt < attempts) {
-      await sleep(delayMs);
-    }
-  }
-
-  throw new Error(
-    "Timed out waiting for checkpointed accrued payroll to become settleable"
-  );
 }
 
 async function main() {
@@ -735,6 +710,65 @@ async function main() {
     keypairSignMessageFactory(employee)
   );
 
+  console.log("\n[0/10] Ensuring company setup exists...");
+  const companyResponse = await companyCreatePost(
+    await makeAuthenticatedJsonRequest({
+      url: "http://localhost/api/company/create",
+      wallet: employerWallet,
+      signer: authority,
+      body: {
+        employerWallet,
+        name: "Expaynse Route Smoke Company",
+      },
+    })
+  );
+  assert.strictEqual(
+    companyResponse.status,
+    200,
+    "Company create should return 200"
+  );
+
+  const companyJson = await json<CompanyCreateResponse>(companyResponse);
+  assert(companyJson.company, companyJson.error || "Company create missing payload");
+
+  console.log("Company ready:", {
+    id: companyJson.company.id,
+    treasuryPubkey: companyJson.company.treasuryPubkey,
+    settlementPubkey: companyJson.company.settlementPubkey,
+  });
+
+  await fundBaseUsdcIfNeeded({
+    connection,
+    payer: authority,
+    recipient: new PublicKey(companyJson.company.treasuryPubkey),
+    minAmountMicro: 100_000n,
+    label: "company-treasury",
+  });
+
+  const treasurySigner = await loadCompanyKeypair({
+    companyId: companyJson.company.id,
+    kind: "treasury",
+  });
+  const treasuryWallet = treasurySigner.publicKey.toBase58();
+  assert.strictEqual(
+    treasuryWallet,
+    companyJson.company.treasuryPubkey,
+    "Loaded treasury signer should match company treasury pubkey"
+  );
+  const treasuryTeeAuthToken = await fetchTeeAuthToken(
+    treasurySigner.publicKey,
+    keypairSignMessageFactory(treasurySigner)
+  );
+  await fundPrivateUsdcIfNeeded({
+    connection,
+    payer: authority,
+    ownerWallet: treasuryWallet,
+    ownerTeeAuthToken: treasuryTeeAuthToken,
+    signer: authority,
+    minAmountMicro: 1n,
+    label: "company-treasury-bootstrap",
+  });
+
   console.log("\n[1/10] Creating employee through /api/employees...");
   const employeeResponse = await employeesPost(
     await makeAuthenticatedJsonRequest({
@@ -782,6 +816,8 @@ async function main() {
         employeeId,
         ratePerSecond,
         status: "paused",
+        payoutMode: "ephemeral",
+        allowedPayoutModes: ["ephemeral", "base"],
       },
     })
   );
@@ -809,10 +845,15 @@ async function main() {
 
   console.log("\n[3/10] Building and finalizing onboarding...");
   const onboardBuildResponse = await onboardBuildPost(
-    makeJsonRequest("http://localhost/api/streams/onboard", {
-      employerWallet,
-      streamId,
-      teeAuthToken: employerTeeAuthToken,
+    await makeAuthenticatedJsonRequest({
+      url: "http://localhost/api/streams/onboard",
+      wallet: employerWallet,
+      signer: authority,
+      body: {
+        employerWallet,
+        streamId,
+        teeAuthToken: employerTeeAuthToken,
+      },
     })
   );
   assert(
@@ -852,17 +893,20 @@ async function main() {
   }
 
   const onboardFinalizeResponse = await onboardFinalizePatch(
-    makeJsonRequest(
-      "http://localhost/api/streams/onboard",
-      {
+    await makeAuthenticatedJsonRequest({
+      url: "http://localhost/api/streams/onboard",
+      wallet: employerWallet,
+      signer: authority,
+      body: {
         employerWallet,
         streamId,
         employeePda: onboardBuildJson.employeePda,
         privatePayrollPda: onboardBuildJson.privatePayrollPda,
         permissionPda: onboardBuildJson.permissionPda,
+        teeAuthToken: employerTeeAuthToken,
       },
-      "PATCH"
-    )
+      method: "PATCH",
+    })
   );
   assert.strictEqual(
     onboardFinalizeResponse.status,
@@ -891,62 +935,102 @@ async function main() {
     delegatedAt: onboardFinalizeJson.stream.delegatedAt,
   });
 
-  console.log("\n[4/10] Employee self-initializes private account...");
-  const privateInitBuildResponse = await employeePrivateInitBuildPost(
-    makeJsonRequest("http://localhost/api/employee-private-init", {
-      employeeWallet,
+  console.log(
+    "\n[4/10] Server auto-init tries sponsor/treasury first, then employee fallback if needed..."
+  );
+  const autoInitResponse = await employeesAutoInitPost(
+    await makeAuthenticatedJsonRequest({
+      url: "http://localhost/api/employees/auto-init",
+      wallet: employerWallet,
+      signer: authority,
+      body: {
+        employerWallet,
+        employeeWallet,
+      },
     })
   );
-  assert.strictEqual(
-    privateInitBuildResponse.status,
-    201,
-    "Employee private init build should return 201"
-  );
 
-  const privateInitBuildJson = await json<
-    EmployeePrivateInitBuildResponse & { error?: string }
-  >(privateInitBuildResponse);
-  assert(
-    privateInitBuildJson.transaction,
-    privateInitBuildJson.error || "Employee private init missing transaction"
-  );
+  const autoInitJson = await json<EmployeeAutoInitResponse>(autoInitResponse);
 
-  await sendBuiltTransaction({
-    spec: privateInitBuildJson.transaction,
-    signer: employee,
-    signerLabel: "employee:initPrivateAccount",
-  });
+  if (autoInitResponse.ok) {
+    assert(
+      autoInitJson.employee,
+      "Server auto-init should return the refreshed employee"
+    );
+    console.log("Server auto-init:", {
+      initializedAt:
+        autoInitJson.employee.privateRecipientInitializedAt ?? null,
+      status: autoInitJson.employee.privateRecipientInitStatus ?? null,
+    });
+  } else {
+    console.log("Server auto-init unavailable, using employee fallback:", {
+      status: autoInitResponse.status,
+      error: autoInitJson.error ?? null,
+    });
 
-  const privateInitFinalizeResponse = await employeePrivateInitFinalizePatch(
-    makeJsonRequest(
-      "http://localhost/api/employee-private-init",
-      {
-        employeeWallet,
-        teeAuthToken: employeeTeeAuthToken,
-      },
-      "PATCH"
-    )
-  );
-  assert.strictEqual(
-    privateInitFinalizeResponse.status,
-    200,
-    "Employee private init finalize should return 200"
-  );
+    const privateInitBuildResponse = await employeePrivateInitBuildPost(
+      await makeAuthenticatedJsonRequest({
+        url: "http://localhost/api/employee-private-init",
+        wallet: employeeWallet,
+        signer: employee,
+        body: {
+          employeeWallet,
+        },
+      })
+    );
+    assert.strictEqual(
+      privateInitBuildResponse.status,
+      201,
+      "Employee private init build should return 201"
+    );
 
-  const privateInitFinalizeJson = await json<
-    EmployeePrivateInitFinalizeResponse & { error?: string }
-  >(privateInitFinalizeResponse);
-  assert(
-    privateInitFinalizeJson.initializedAt,
-    privateInitFinalizeJson.error ||
-      "Employee private init finalize missing timestamp"
-  );
+    const privateInitBuildJson = await json<
+      EmployeePrivateInitBuildResponse & { error?: string }
+    >(privateInitBuildResponse);
+    assert(
+      privateInitBuildJson.transaction,
+      privateInitBuildJson.error || "Employee private init missing transaction"
+    );
 
-  console.log("Employee private init:", {
-    initializedAt: privateInitFinalizeJson.initializedAt,
-    privateBalance:
-      privateInitFinalizeJson.privateBalance?.balance ?? "unknown",
-  });
+    await sendBuiltTransaction({
+      spec: privateInitBuildJson.transaction,
+      signer: employee,
+      signerLabel: "employee:initPrivateAccount",
+    });
+
+    const privateInitFinalizeResponse = await employeePrivateInitFinalizePatch(
+      await makeAuthenticatedJsonRequest({
+        url: "http://localhost/api/employee-private-init",
+        wallet: employeeWallet,
+        signer: employee,
+        body: {
+          employeeWallet,
+          teeAuthToken: employeeTeeAuthToken,
+        },
+        method: "PATCH",
+      })
+    );
+    assert.strictEqual(
+      privateInitFinalizeResponse.status,
+      200,
+      "Employee private init finalize should return 200"
+    );
+
+    const privateInitFinalizeJson = await json<
+      EmployeePrivateInitFinalizeResponse & { error?: string }
+    >(privateInitFinalizeResponse);
+    assert(
+      privateInitFinalizeJson.initializedAt,
+      privateInitFinalizeJson.error ||
+        "Employee private init finalize missing timestamp"
+    );
+
+    console.log("Employee manual init:", {
+      initializedAt: privateInitFinalizeJson.initializedAt,
+      privateBalance:
+        privateInitFinalizeJson.privateBalance?.balance ?? "unknown",
+    });
+  }
 
   console.log("\n[5/10] Resuming stream and scheduling checkpoint crank...");
   const resumeJson = await buildControlAndFinalize({
@@ -1048,120 +1132,213 @@ async function main() {
     "active",
     "Second resume should restore active status before settlement"
   );
-
-  console.log("\n[8/10] Building settlement tick through /api/payroll/tick...");
-  const streamResult = await waitForSettlementBuild({
+  const resumedAgainCrankJson = await buildCheckpointCrankAndFinalize({
     employerWallet,
-    employerTeeAuthToken,
     streamId,
+    teeAuthToken: employerTeeAuthToken,
+    signer: authority,
+    mode: "schedule",
   });
-
-  console.log("Tick build result:", {
-    amountMicro: streamResult.amountMicro,
-    employeePda: streamResult.employeePda,
-    privatePayrollPda: streamResult.privatePayrollPda,
-  });
-
-  console.log(
-    "\n[9/10] Funding employer private balance and sending settlement..."
+  assert.strictEqual(
+    resumedAgainCrankJson.stream?.checkpointCrankStatus,
+    "active",
+    "Second resume should reactivate checkpoint crank before settlement"
   );
-  await fundEmployerPrivateUsdcIfNeeded({
-    employerWallet,
-    employerTeeAuthToken,
-    signer: authority,
-    minAmountMicro: BigInt(streamResult.amountMicro!),
-  });
 
-  const transferSignature = await sendBuiltTransaction({
-    spec: streamResult.transactions!.transfer!,
-    signer: authority,
-    signerLabel: "tick:transfer",
-  });
-  const settleSalarySignature = await sendBuiltTransaction({
-    spec: streamResult.transactions!.settleSalary!,
-    signer: authority,
-    signerLabel: "tick:settleSalary",
-    teeAuthToken: employerTeeAuthToken,
-    useTeeRpc: true,
-  });
-  const commitSignature = await sendBuiltTransaction({
-    spec: streamResult.transactions!.commitEmployee!,
-    signer: authority,
-    signerLabel: "tick:commitEmployee",
-    teeAuthToken: employerTeeAuthToken,
-    useTeeRpc: true,
-  });
+  console.log("\n[8/10] Funding treasury private balance and building employee claim...");
+  const employeePrivateBeforeClaim = BigInt(
+    (await getPrivateBalance(employeeWallet, employeeTeeAuthToken)).balance
+  );
 
-  console.log("Settlement signatures:", {
-    transferSignature,
-    settleSalarySignature,
-    commitSignature,
-  });
-
-  console.log("\n[10/10] Finalizing payroll tick...");
-  const tickFinalizePayload: TickFinalizeItem[] = [
-    {
-      streamId,
-      employeeId,
-      employeeWallet,
-      amountMicro: streamResult.amountMicro!,
-      employeePda: streamResult.employeePda!,
-      privatePayrollPda: streamResult.privatePayrollPda!,
-      transferSignature,
-      settleSalarySignature,
-      commitSignature,
-    },
-  ];
-
-  const tickFinalizeResponse = await tickFinalizePatch(
-    makeJsonRequest(
-      "http://localhost/api/payroll/tick",
-      {
-        employerWallet,
-        results: tickFinalizePayload,
-      },
-      "PATCH"
+  const postResumePreviewResponse = await previewGet(
+    makeGetRequest(
+      `http://localhost/api/payroll/preview?employerWallet=${encodeURIComponent(
+        employerWallet
+      )}&streamId=${encodeURIComponent(streamId)}`,
+      employerTeeAuthToken
     )
   );
   assert.strictEqual(
-    tickFinalizeResponse.status,
+    postResumePreviewResponse.status,
     200,
-    "Tick finalize should return 200"
+    "Preview before claim should return 200"
+  );
+  const postResumePreviewJson = await json<{
+    preview: {
+      claimableAmountMicro: number;
+    };
+    error?: string;
+  }>(postResumePreviewResponse);
+  const claimAmountMicro = Math.max(
+    1,
+    Math.min(postResumePreviewJson.preview.claimableAmountMicro, 1_000_000)
+  );
+  assert(
+    claimAmountMicro > 0,
+    "Expected positive claimable balance before employee claim"
+  );
+  await fundWalletPrivateUsdcIfNeeded({
+    connection,
+    payer: authority,
+    ownerWallet: treasuryWallet,
+    ownerTeeAuthToken: treasuryTeeAuthToken,
+    signer: authority,
+    minAmountMicro: BigInt(claimAmountMicro + 100_000),
+    label: "company-treasury",
+  });
+  await fundBaseUsdcIfNeeded({
+    connection,
+    payer: authority,
+    recipient: treasurySigner.publicKey,
+    minAmountMicro: BigInt(claimAmountMicro + 100_000),
+    label: "company-treasury",
+  });
+
+  const claimBuildResponse = await claimRequestBuildPost(
+    await makeAuthenticatedJsonRequest({
+      url: "http://localhost/api/claim-salary/request",
+      wallet: employeeWallet,
+      signer: employee,
+      body: {
+        employeeWallet,
+        streamId,
+        amountMicro: claimAmountMicro,
+        teeAuthToken: employeeTeeAuthToken,
+      },
+    })
+  );
+  assert.strictEqual(
+    claimBuildResponse.status,
+    201,
+    "Claim build should return 201"
   );
 
-  const tickFinalizeJson = await json<{
-    employerWallet: string;
-    processed: number;
-    totalTransferredMicro: number;
-    results: TickFinalizeItem[];
-    error?: string;
-  }>(tickFinalizeResponse);
-  assert.strictEqual(tickFinalizeJson.employerWallet, employerWallet);
+  const claimBuildJson = await json<ClaimRequestBuildResponse>(
+    claimBuildResponse
+  );
+  assert(
+    claimBuildJson.transactions?.requestWithdrawal,
+    claimBuildJson.error || "Claim build should include requestWithdrawal tx"
+  );
+
+  console.log("Claim build result:", {
+    claimId: claimBuildJson.claimId,
+    amountMicro: claimBuildJson.amountMicro,
+  });
+
+  const requestWithdrawalSignature = await sendBuiltTransaction({
+    spec: claimBuildJson.transactions.requestWithdrawal,
+    signer: employee,
+    signerLabel: "claim:requestWithdrawal",
+    teeAuthToken: employeeTeeAuthToken,
+    useTeeRpc: true,
+  });
+  const claimFinalizeResponse = await claimRequestFinalizePatch(
+    await makeAuthenticatedJsonRequest({
+      url: "http://localhost/api/claim-salary/request",
+      wallet: employeeWallet,
+      signer: employee,
+      body: {
+        employeeWallet,
+        streamId,
+        amountMicro: claimAmountMicro,
+        claimId: claimBuildJson.claimId,
+        signature: requestWithdrawalSignature,
+        teeAuthToken: employeeTeeAuthToken,
+      },
+      method: "PATCH",
+    })
+  );
   assert.strictEqual(
-    tickFinalizeJson.totalTransferredMicro,
-    streamResult.amountMicro,
-    "Tick finalize total should match settled amount"
+    claimFinalizeResponse.status,
+    200,
+    "Claim finalize should return 200"
+  );
+  const claimFinalizeJson = await json<ClaimRequestFinalizeResponse>(
+    claimFinalizeResponse
+  );
+  assert(
+    claimFinalizeJson.claim,
+    claimFinalizeJson.error || "Claim finalize should persist pending claim"
+  );
+  assert.strictEqual(
+    claimFinalizeJson.claim?.status,
+    "requested",
+    "Claim finalize should persist the request as requested"
+  );
+
+  console.log("\n[9/10] Processing server-side payout...");
+  const processClaimResponse = await claimProcessPost(
+    await makeAuthenticatedJsonRequest({
+      url: "http://localhost/api/claim-salary/process",
+      wallet: employeeWallet,
+      signer: employee,
+      body: {
+        streamId,
+        teeAuthToken: employeeTeeAuthToken,
+        employeeWallet,
+      },
+    })
+  );
+  assert.strictEqual(
+    processClaimResponse.status,
+    200,
+    "Claim process should return 200"
+  );
+  const processClaimJson = await json<ClaimProcessResponse>(processClaimResponse);
+  assert(
+    processClaimJson.claim,
+    processClaimJson.error || "Claim process should return the processed claim"
+  );
+  assert.strictEqual(
+    processClaimJson.claim?.status,
+    "paid",
+    "Claim process should settle the request as paid"
+  );
+
+  console.log("Processed claim:", {
+    claimId: processClaimJson.claim?.id,
+    paymentTxSignature: processClaimJson.claim?.paymentTxSignature,
+    markPaidTxSignature: processClaimJson.claim?.markPaidTxSignature,
+  });
+
+  console.log("\n[10/10] Verifying persisted claim state and employee balances...");
+  const employeePrivateAfterClaim = await waitForPrivateBalanceAtLeast({
+    label: "employee-private-after-claim",
+    address: employeeWallet,
+    token: employeeTeeAuthToken,
+    minMicro: employeePrivateBeforeClaim + BigInt(claimAmountMicro),
+  });
+  const payrollStore = await getPayrollStore();
+  const persistedClaim = [...payrollStore.onChainClaims]
+    .reverse()
+    .find((claim) => claim.streamId === streamId);
+  assert(persistedClaim, "Persisted claim should exist after processing");
+  assert.strictEqual(
+    persistedClaim?.status,
+    "paid",
+    "Persisted claim should be marked paid"
+  );
+  const persistedTransfer = [...payrollStore.transfers]
+    .reverse()
+    .find((transfer) => transfer.streamId === streamId);
+  assert(persistedTransfer, "Persisted transfer should exist after processing");
+  assert.strictEqual(
+    persistedTransfer?.status,
+    "success",
+    "Persisted transfer should be marked success"
   );
 
   const persistedStream = await getStreamById(employerWallet, streamId);
-  assert(persistedStream, "Persisted stream should exist after tick finalize");
-  assert(
-    typeof persistedStream!.totalPaid === "number" &&
-      persistedStream!.totalPaid > 0,
-    "Persisted stream should record totalPaid after tick finalize"
-  );
-  assert(
-    persistedStream!.lastPaidAt,
-    "Persisted stream should have lastPaidAt after tick finalize"
-  );
+  assert(persistedStream, "Persisted stream should exist after claim processing");
 
-  console.log("Persisted stream after tick:", {
-    id: persistedStream!.id,
-    totalPaid: persistedStream!.totalPaid,
-    lastPaidAt: persistedStream!.lastPaidAt,
-    employeePda: persistedStream!.employeePda,
-    privatePayrollPda: persistedStream!.privatePayrollPda,
-    permissionPda: persistedStream!.permissionPda,
+  console.log("Claim settlement snapshot:", {
+    claimAmountMicro,
+    employeePrivateBeforeClaim: employeePrivateBeforeClaim.toString(),
+    employeePrivateAfterClaim: employeePrivateAfterClaim.toString(),
+    persistedClaimStatus: persistedClaim?.status,
+    persistedTransferStatus: persistedTransfer?.status,
+    streamStatus: persistedStream!.status,
   });
 
   console.log("\n=== Route Smoke Test Summary ===");
@@ -1170,9 +1347,9 @@ async function main() {
   console.log("Employee PDA:", onboardBuildJson.employeePda);
   console.log("Private Payroll PDA:", onboardBuildJson.privatePayrollPda);
   console.log("Permission PDA:", onboardBuildJson.permissionPda);
-  console.log("Preview Claimable:", previewJson.preview.claimableAmountMicro);
-  console.log("Tick Transfer Signature:", transferSignature);
-  console.log("Tick Amount:", streamResult.amountMicro);
+  console.log("Preview Claimable:", postResumePreviewJson.preview.claimableAmountMicro);
+  console.log("Processed Claim ID:", claimBuildJson.claimId);
+  console.log("Processed Claim Amount:", claimAmountMicro);
   console.log("\nRoute-level app smoke test completed.");
 }
 

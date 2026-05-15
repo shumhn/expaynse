@@ -21,6 +21,8 @@ If you are reviewing the MagicBlock integration, start here:
 - `scripts/payroll/check-magicblock-health.ts`: reviewer-friendly connectivity check
 - `scripts/payroll/verify-devnet.js`: end-to-end devnet verifier for the private payroll flow
 - `lib/magicblock-api.ts`: app-side MagicBlock API helpers used by the web product
+- `tests/app/payroll-end-to-end.e2e.ts`: the canonical app-level end-to-end payroll flow
+- `tests/app/payroll-realtime.e2e.ts`: the canonical realtime payroll accrual flow across employer and employee actors
 
 ## Repository Layout
 
@@ -42,6 +44,8 @@ If you are reviewing the MagicBlock integration, start here:
 - `npm run dev`: run the web app locally
 - `npm run payroll:build`: build the Anchor payroll program
 - `npm run payroll:test`: run Anchor payroll tests
+- `npm run test:app:e2e`: run the canonical app-level payroll end-to-end flow
+- `npm run test:app:realtime`: run the canonical realtime payroll flow
 - `npm run payroll:magicblock:health`: verify MagicBlock ER/PER connectivity
 - `npm run payroll:verify:devnet`: run the end-to-end payroll verifier against devnet
 - `npm run test:app:smoke`: route-level smoke with `.env`
@@ -52,5 +56,3 @@ If you are reviewing the MagicBlock integration, start here:
 - Keep route files in `app/**/page.tsx` thin; place heavy logic in sibling feature modules.
 - Keep temporary outputs out of tracked repo surfaces.
 - Do not delete pitch materials; archive them under `assets/pitch/`.
-
-

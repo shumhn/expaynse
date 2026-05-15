@@ -2,7 +2,7 @@ import nacl from "tweetnacl";
 import { NextRequest } from "next/server.js";
 import { Keypair } from "@solana/web3.js";
 
-import { createSignedWalletRequestHeaders } from "../lib/wallet-request-auth.ts";
+import { createSignedWalletRequestHeaders } from "../../lib/wallet-request-auth.ts";
 
 export function keypairSignMessageFactory(signer: Keypair) {
   return async (message: Uint8Array) =>

@@ -1,27 +1,11 @@
-import {
-  Connection,
-  Keypair,
-  Transaction,
-  VersionedTransaction,
-} from "@solana/web3.js";
+import { Keypair, Transaction, VersionedTransaction } from "@solana/web3.js";
+import { getAuthToken } from "@magicblock-labs/ephemeral-rollups-sdk";
 import {
   buildPrivateTransfer,
   DEVNET_USDC,
+  signAndSend,
   type PrivateTransferPrivacyConfig,
 } from "@/lib/magicblock-api";
-
-// ── RPC URLs ─────────────────────────────────────────────────
-// The base-layer RPC for sending normal Solana transactions
-const BASE_RPC_URL =
-  process.env.BASE_RPC_URL ||
-  process.env.NEXT_PUBLIC_SOLANA_RPC_URL ||
-  "https://api.devnet.solana.com";
-
-// The Ephemeral Rollup RPC for sending ER-routed transactions
-const ER_RPC_URL =
-  process.env.ER_RPC_URL ||
-  process.env.NEXT_PUBLIC_MAGICBLOCK_EPHEMERAL_RPC_URL ||
-  "https://devnet.magicblock.app";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -47,16 +31,9 @@ export type TreasuryTransferResult = {
 
 // ── Helpers ──────────────────────────────────────────────────
 
-function decodeBuiltTransaction(
-  transactionBase64: string,
-): Transaction | VersionedTransaction {
-  const raw = Buffer.from(transactionBase64, "base64");
-  try {
-    return VersionedTransaction.deserialize(raw);
-  } catch {
-    return Transaction.from(raw);
-  }
-}
+const TEE_URL =
+  process.env.NEXT_PUBLIC_MAGICBLOCK_TEE_RPC_URL ||
+  "https://devnet-tee.magicblock.app";
 
 function signTx(
   tx: Transaction | VersionedTransaction,
@@ -68,18 +45,6 @@ function signTx(
   }
   tx.partialSign(signer);
   return tx;
-}
-
-function resolveRpcUrl(sendTo: string): string {
-  const normalized = sendTo.toLowerCase();
-  if (
-    normalized.includes("er") ||
-    normalized.includes("ephemeral") ||
-    normalized.includes("magic")
-  ) {
-    return ER_RPC_URL;
-  }
-  return BASE_RPC_URL;
 }
 
 // ── Main export ──────────────────────────────────────────────
@@ -104,6 +69,13 @@ export async function sendPayrollFromCompanyTreasury(
 
   const fromBalance = args.fromBalance ?? envFromBalance;
   const toBalance = args.toBalance ?? envToBalance;
+  const naclModule = await import("tweetnacl");
+  const nacl = naclModule.default ?? naclModule;
+  const auth = await getAuthToken(
+    TEE_URL,
+    args.treasuryKeypair.publicKey,
+    async (message) => nacl.sign.detached(message, args.treasuryKeypair.secretKey),
+  );
 
   // 1. Build the unsigned transfer via MagicBlock Private Payments API
   const transferBuild = await buildPrivateTransfer({
@@ -111,6 +83,7 @@ export async function sendPayrollFromCompanyTreasury(
     to: args.employeeWallet,
     amountMicro: args.amountMicro,
     outputMint: DEVNET_USDC,
+    token: auth.token,
     balances: {
       fromBalance,
       toBalance,
@@ -135,30 +108,22 @@ export async function sendPayrollFromCompanyTreasury(
     );
   }
 
-  // 2. Deserialize and sign with treasury keypair
-  const tx = decodeBuiltTransaction(transactionBase64);
-  signTx(tx, args.treasuryKeypair);
-
-  // 3. Serialize and send to the correct RPC
-  const rawTx =
-    tx instanceof VersionedTransaction
-      ? tx.serialize()
-      : tx.serialize({ requireAllSignatures: true, verifySignatures: false });
-
   const sendTo = String(transferBuild.sendTo ?? "base").toLowerCase();
-  const rpcUrl = resolveRpcUrl(sendTo);
 
-  const connection = new Connection(rpcUrl, "confirmed");
-  const signature = await connection.sendRawTransaction(
-    rawTx instanceof Uint8Array ? Buffer.from(rawTx) : rawTx,
+  // Reuse the app's resilient signing/sending path so server-side treasury
+  // payouts get the same blockhash refresh and transient ER retry handling as
+  // wallet-submitted app transactions.
+  const signature = await signAndSend(
+    transactionBase64,
+    async (tx: Transaction | VersionedTransaction) => {
+      return signTx(tx, args.treasuryKeypair);
+    },
     {
-      skipPreflight: false,
-      maxRetries: 5,
+      sendTo,
+      retrySendCount: 3,
+      retryDelayMs: 1_000,
     },
   );
-
-  // 4. Confirm the transaction
-  await connection.confirmTransaction(signature, "confirmed");
 
   return {
     signature,
