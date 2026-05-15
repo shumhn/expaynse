@@ -6,7 +6,7 @@ import {
   hasDevnetUsdt,
   SOL_MINT,
   toSwapInputAmountRaw,
-} from "../lib/private-swap.ts";
+} from "../../lib/private-swap.ts";
 
 function run() {
   const withoutUsdt = getTreasuryFundingModeMeta("");

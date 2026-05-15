@@ -5,7 +5,7 @@ import fs from "node:fs";
 const projectRoot = path.resolve(process.cwd());
 const nextServerShimPath = path.resolve(
   projectRoot,
-  "tests/next-server-shim.mjs",
+  "tests/helpers/next-server-shim.mjs",
 );
 
 function resolveTsPath(relativePath) {

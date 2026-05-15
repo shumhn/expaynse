@@ -5,7 +5,7 @@ import {
   deriveCheckpointCrankMode,
   isFutureIsoTimestamp,
   normalizeCheckpointTaskId,
-} from "../lib/server/checkpoint-crank.ts";
+} from "../../lib/server/checkpoint-crank.ts";
 
 function run() {
   assert.equal(

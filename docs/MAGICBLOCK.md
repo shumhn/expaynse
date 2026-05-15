@@ -9,7 +9,7 @@ Expaynse uses MagicBlock as the real-time execution layer for private payroll.
 - `programs/payroll/src/lib.rs`
   Anchor program entrypoints for employee creation, delegation, checkpoint accrual, and withdrawal lifecycle.
 - `scripts/payroll/`
-  Operational devnet scripts for onboarding, crank simulation, transfer testing, and verifier flows.
+  Operational devnet scripts for onboarding, crank simulation, transfer testing, verifier flows, and deploy/IDL repair helpers under `scripts/payroll/devnet/`.
 - `tests/payroll/`
   End-to-end devnet tests that exercise the delegated payroll lifecycle.
 - `lib/magicblock-api.ts`

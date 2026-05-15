@@ -28,8 +28,12 @@ If you are reviewing the MagicBlock integration, start here:
 - `components/`: shared UI and feature components
 - `lib/`: client/server domain logic and MagicBlock-facing app helpers
 - `programs/payroll/`: Anchor payroll program used for private, delegated payroll flows
-- `scripts/payroll/`: devnet verification, crank, onboarding, and MagicBlock operational scripts
-- `tests/`: app tests plus `tests/payroll/` devnet payroll integration coverage
+- `scripts/payroll/`: MagicBlock and payroll operational scripts, including `devnet/` deployment helpers
+- `tests/app/`: app smoke, self-custody, checkpoint, and authenticated route coverage
+- `tests/payroll/`: devnet payroll integration coverage
+- `tests/treasury/`: treasury swap and payout configuration tests
+- `tests/magicblock/`: focused MagicBlock API end-to-end coverage
+- `tests/helpers/`: shared test loader, Next shim, and authenticated request helpers
 - `public/`: static assets used by the web app
 - `assets/`: non-runtime artifacts such as branding and pitch references
 
@@ -48,6 +52,5 @@ If you are reviewing the MagicBlock integration, start here:
 - Keep route files in `app/**/page.tsx` thin; place heavy logic in sibling feature modules.
 - Keep temporary outputs out of tracked repo surfaces.
 - Do not delete pitch materials; archive them under `assets/pitch/`.
-
 
 
