@@ -14,7 +14,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import Link from "next/link";
-import { EmployerLayout } from "@/components/employer-layout";
+import { EmployeeLayout } from "@/components/employee-layout";
 import { useClaimData } from "@/components/claim/use-claim-data";
 import { computeLiveClaimableAmountMicro } from "@/components/claim/claim-utils";
 import {
@@ -779,7 +779,7 @@ export default function ClaimWithdrawPage() {
   };
 
   return (
-    <EmployerLayout>
+    <EmployeeLayout>
       <div className="mx-auto max-w-4xl px-4 py-8 flex flex-col items-center">
         <div className="mb-8 flex w-full flex-col items-center text-center">
           <div className="mb-6 flex w-fit rounded-full border border-white/10 bg-white/5 p-1 backdrop-blur-xl">
@@ -1283,6 +1283,6 @@ export default function ClaimWithdrawPage() {
             </div>
           </div>
         </div>
-    </EmployerLayout>
+    </EmployeeLayout>
   );
 }

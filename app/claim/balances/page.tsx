@@ -12,7 +12,7 @@ import {
   ShieldAlert
 } from "lucide-react";
 import Link from "next/link";
-import { EmployerLayout } from "@/components/employer-layout";
+import { EmployeeLayout } from "@/components/employee-layout";
 import { useClaimData } from "@/components/claim/use-claim-data";
 import { 
   formatMicroUsdc,
@@ -215,7 +215,7 @@ export default function ClaimBalancesPage() {
   }[employeeBalanceState];
 
   return (
-    <EmployerLayout>
+    <EmployeeLayout>
       <div className="mx-auto max-w-6xl px-4 py-2 sm:px-6">
         <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
           <div>
@@ -395,6 +395,6 @@ export default function ClaimBalancesPage() {
           </div>
         </div>
       </div>
-    </EmployerLayout>
+    </EmployeeLayout>
   );
 }
