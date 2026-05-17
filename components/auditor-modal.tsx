@@ -81,7 +81,7 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
       >
         <div className="flex justify-between items-center p-6 border-b border-white/5 relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-to-r from-[#1eba98]/10 to-transparent pointer-events-none" />
-          <h2 className="text-xl font-bold text-white relative z-10">Auditor Access Link</h2>
+          <h2 className="text-xl font-bold text-white relative z-10">Auditor link</h2>
           <button 
             onClick={handleClose}
             className="p-2 hover:bg-white/10 rounded-full transition-colors relative z-10"
@@ -94,9 +94,9 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
           <div className="mb-6 p-4 rounded-2xl bg-[#1eba98]/10 border border-[#1eba98]/20 flex gap-3">
             <ShieldAlert className="text-[#1eba98] shrink-0" size={20} />
             <div>
-              <h4 className="text-sm font-bold text-[#1eba98] mb-1">Scoped Auditor Access</h4>
+              <h4 className="text-sm font-bold text-[#1eba98] mb-1">Read-only auditor access</h4>
               <p className="text-xs text-[#a8a8aa]">
-                This generates a scoped, read-only link. Auditors can review payroll evidence, activity history, and statement records without gaining transaction control.
+                This creates a read-only link for review. Auditors can see payroll records and activity, but they cannot move funds or change anything.
               </p>
             </div>
           </div>
@@ -108,22 +108,22 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
           )}
 
           {!token ? (
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#8f8f95]">
-                  Link label
+            <div className="space-y-5">
+              <div className="space-y-0">
+                <label className="mb-3 block text-[11px] font-bold uppercase tracking-[0.16em] text-[#8f8f95]">
+                  Audit purpose
                 </label>
                 <input
                   value={label}
                   onChange={(event) => setLabel(event.target.value)}
-                  placeholder="Q2 payroll audit"
+                  placeholder="Quarterly audit"
                   className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder:text-[#6f6f75] focus:border-[#1eba98]/30 focus:outline-none"
                 />
               </div>
 
-              <div className="space-y-2">
-                <label className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#8f8f95]">
-                  Access window
+              <div className="space-y-0 pt-1">
+                <label className="mb-3 block text-[11px] font-bold uppercase tracking-[0.16em] text-[#8f8f95]">
+                  Link expires in
                 </label>
                 <div className="grid grid-cols-3 gap-2">
                   {[7, 30, 90].map((days) => (
@@ -148,7 +148,7 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
                 disabled={isGenerating || !publicKey}
                 className="w-full py-4 bg-white hover:bg-gray-200 disabled:bg-white/10 disabled:text-[#8f8f95] text-black font-bold rounded-2xl transition-all shadow-[0_0_40px_rgba(255,255,255,0.1)] hover:shadow-[0_0_60px_rgba(255,255,255,0.2)] disabled:shadow-none uppercase tracking-widest text-xs flex items-center justify-center gap-2 active:scale-[0.98]"
               >
-                {isGenerating ? "Generating Secure Token..." : "Generate Access Link"}
+                {isGenerating ? "Creating link..." : "Create auditor link"}
               </button>
             </div>
           ) : (
@@ -165,7 +165,7 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
                 </button>
               </div>
               <p className="text-xs text-center text-[#8f8f95]">
-                Send this link to your accountant or auditor. You can revoke this token at any time from the dashboard.
+                Send this link to your auditor or accountant. You can revoke it anytime from the dashboard.
               </p>
             </div>
           )}
