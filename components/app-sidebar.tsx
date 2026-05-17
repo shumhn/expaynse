@@ -37,6 +37,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { label: "Home", href: "/dashboard", icon: LayoutDashboard, role: "employer" },
   { label: "Employee", href: "/people", icon: Users, role: "employer" },
+  { label: "Compliance", href: "/compliance", icon: ShieldCheck, role: "employer" },
   { label: "Dashboard", href: "/claim/dashboard", icon: LayoutDashboard, role: "employee" },
   { label: "Balances", href: "/claim/balances", icon: Wallet, role: "employee" },
   { label: "Withdraw", href: "/claim/withdraw", icon: ArrowUpRight, role: "employee" },
@@ -64,6 +65,8 @@ export function AppSidebar({
   const isClaimRoute = pathname === "/claim" || pathname?.startsWith("/claim/");
   const isEmployerRoute =
     pathname === "/dashboard" ||
+    pathname === "/compliance" ||
+    pathname?.startsWith("/compliance/") ||
     pathname === "/people" ||
     pathname?.startsWith("/people/") ||
     pathname === "/disburse" ||

@@ -16,6 +16,8 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [label, setLabel] = useState("");
+  const [expiresDays, setExpiresDays] = useState(30);
 
   if (!isOpen) return null;
 
@@ -30,7 +32,11 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
       const response = await walletAuthenticatedFetch({
         path: "/api/auditor-tokens",
         method: "POST",
-        body: { employerWallet },
+        body: {
+          employerWallet,
+          label: label.trim() || undefined,
+          expiresDays,
+        },
         wallet: employerWallet,
         signMessage,
       });
@@ -62,6 +68,8 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
     setToken(null);
     setError(null);
     setCopied(false);
+    setLabel("");
+    setExpiresDays(30);
     onClose();
   };
 
@@ -86,9 +94,9 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
           <div className="mb-6 p-4 rounded-2xl bg-[#1eba98]/10 border border-[#1eba98]/20 flex gap-3">
             <ShieldAlert className="text-[#1eba98] shrink-0" size={20} />
             <div>
-              <h4 className="text-sm font-bold text-[#1eba98] mb-1">Secure Ledger Export</h4>
+              <h4 className="text-sm font-bold text-[#1eba98] mb-1">Scoped Auditor Access</h4>
               <p className="text-xs text-[#a8a8aa]">
-                This generates a scoped, read-only token. Anyone with this link can view your decrypted ledger and compliance certificates, but cannot execute transactions.
+                This generates a scoped, read-only link. Auditors can review payroll evidence, activity history, and statement records without gaining transaction control.
               </p>
             </div>
           </div>
@@ -100,13 +108,49 @@ export function AuditorModal({ isOpen, onClose }: AuditorModalProps) {
           )}
 
           {!token ? (
-            <button
-              onClick={handleGenerate}
-              disabled={isGenerating || !publicKey}
-              className="w-full py-4 bg-white hover:bg-gray-200 disabled:bg-white/10 disabled:text-[#8f8f95] text-black font-bold rounded-2xl transition-all shadow-[0_0_40px_rgba(255,255,255,0.1)] hover:shadow-[0_0_60px_rgba(255,255,255,0.2)] disabled:shadow-none uppercase tracking-widest text-xs flex items-center justify-center gap-2 active:scale-[0.98]"
-            >
-              {isGenerating ? "Generating Secure Token..." : "Generate Access Link"}
-            </button>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#8f8f95]">
+                  Link label
+                </label>
+                <input
+                  value={label}
+                  onChange={(event) => setLabel(event.target.value)}
+                  placeholder="Q2 payroll audit"
+                  className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder:text-[#6f6f75] focus:border-[#1eba98]/30 focus:outline-none"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#8f8f95]">
+                  Access window
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {[7, 30, 90].map((days) => (
+                    <button
+                      key={days}
+                      type="button"
+                      onClick={() => setExpiresDays(days)}
+                      className={`rounded-2xl border px-3 py-3 text-xs font-bold uppercase tracking-[0.16em] transition ${
+                        expiresDays === days
+                          ? "border-[#1eba98]/30 bg-[#1eba98]/10 text-[#1eba98]"
+                          : "border-white/10 bg-white/5 text-[#a8a8aa] hover:bg-white/10"
+                      }`}
+                    >
+                      {days} days
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                onClick={handleGenerate}
+                disabled={isGenerating || !publicKey}
+                className="w-full py-4 bg-white hover:bg-gray-200 disabled:bg-white/10 disabled:text-[#8f8f95] text-black font-bold rounded-2xl transition-all shadow-[0_0_40px_rgba(255,255,255,0.1)] hover:shadow-[0_0_60px_rgba(255,255,255,0.2)] disabled:shadow-none uppercase tracking-widest text-xs flex items-center justify-center gap-2 active:scale-[0.98]"
+              >
+                {isGenerating ? "Generating Secure Token..." : "Generate Access Link"}
+              </button>
+            </div>
           ) : (
             <div className="space-y-4">
               <div className="p-4 rounded-xl border border-white/10 bg-white/5 flex items-center justify-between gap-3">

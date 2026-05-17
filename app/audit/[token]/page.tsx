@@ -23,6 +23,11 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
   const [isValidating, setIsValidating] = useState(true);
   const [isValid, setIsValid] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [tokenMeta, setTokenMeta] = useState<{
+    employerWallet: string;
+    label?: string;
+    expiresAt: string;
+  } | null>(null);
 
   useEffect(() => {
     const verifyToken = async () => {
@@ -37,6 +42,12 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
         }
         
         setIsValid(true);
+        const validation = (await response.json()) as {
+          employerWallet: string;
+          label?: string;
+          expiresAt: string;
+        };
+        setTokenMeta(validation);
         
         // Fetch audit data
         const auditResponse = await fetch(`/api/audit?token=${token}`);
@@ -96,7 +107,7 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
         `"${t.meta}"`,
         t.amount.toString(),
         t.status,
-        "AML/OFAC Cleared",
+        "Scoped auditor view",
         t.txSig || "N/A"
       ].join(","))
     ].join("\n");
@@ -116,9 +127,9 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
     return (
       <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
         <ShieldCheck size={48} className="text-[#1eba98] animate-pulse mb-6" />
-        <h2 className="text-xl font-bold text-white mb-2 tracking-tight">Authenticating Link</h2>
+        <h2 className="text-xl font-bold text-white mb-2 tracking-tight">Authenticating Auditor Link</h2>
         <p className="text-sm text-[#a8a8aa] max-w-sm text-center">
-          Verifying secure access token and fetching decrypted compliance ledger...
+          Verifying secure access token and loading the scoped payroll evidence bundle...
         </p>
       </div>
     );
@@ -145,24 +156,37 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
         <div className="flex items-center gap-4">
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#1eba98]/10 border border-[#1eba98]/20">
             <CheckCircle2 size={14} className="text-[#1eba98]" />
-            <span className="text-xs font-bold text-[#1eba98] tracking-widest uppercase">AML/OFAC Screened</span>
+            <span className="text-xs font-bold text-[#1eba98] tracking-widest uppercase">Read-only auditor view</span>
           </div>
           <button
             onClick={handleExportCSV}
             className="flex items-center gap-2 px-5 py-2.5 bg-white text-black text-sm font-bold rounded-2xl hover:bg-white/90 transition-all shadow-sm active:scale-[0.98]"
           >
             <Download size={16} />
-            Export Certified CSV
+            Export CSV
           </button>
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto py-12 px-4 sm:px-6">
         <div className="mb-10">
-          <h1 className="text-3xl font-bold tracking-tight mb-2">Certified Compliance Ledger</h1>
+          <h1 className="text-3xl font-bold tracking-tight mb-2">Auditor Compliance Ledger</h1>
           <p className="text-[#a8a8aa] text-sm">
-            Read-only transaction history. All records have passed real-time AML checks and OFAC-sanctioned geofencing via MagicBlock.
+            Read-only transaction history for payroll review. This view is scoped for auditor access and does not grant transaction permissions.
           </p>
+          {tokenMeta ? (
+            <div className="mt-4 flex flex-wrap gap-3 text-xs text-[#8f8f95]">
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
+                {tokenMeta.label?.trim() || "Auditor access link"}
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
+                Employer {tokenMeta.employerWallet.slice(0, 4)}...{tokenMeta.employerWallet.slice(-4)}
+              </span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
+                Expires {new Date(tokenMeta.expiresAt).toLocaleDateString()}
+              </span>
+            </div>
+          ) : null}
         </div>
 
         <div className="bg-[#0a0a0a] border border-white/5 rounded-3xl overflow-hidden shadow-2xl">
@@ -210,7 +234,7 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
                       <td className="py-4 px-6">
                         <div className="text-sm font-bold text-white">{item.meta}</div>
                         <div className="text-[10px] text-[#1eba98] font-bold mt-0.5 flex items-center gap-1">
-                           <ShieldCheck size={10} /> AML/OFAC Cleared
+                           <ShieldCheck size={10} /> Scoped auditor record
                         </div>
                       </td>
                       <td className="py-4 px-6 text-center">
