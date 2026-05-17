@@ -29,6 +29,8 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
     expiresAt: string;
   } | null>(null);
 
+  const totalReviewedAmount = transactions.reduce((sum, item) => sum + item.amount, 0);
+
   useEffect(() => {
     const verifyToken = async () => {
       setIsValidating(true);
@@ -127,9 +129,9 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
     return (
       <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
         <ShieldCheck size={48} className="text-[#1eba98] animate-pulse mb-6" />
-        <h2 className="text-xl font-bold text-white mb-2 tracking-tight">Authenticating Auditor Link</h2>
+        <h2 className="text-xl font-bold text-white mb-2 tracking-tight">Checking auditor link</h2>
         <p className="text-sm text-[#a8a8aa] max-w-sm text-center">
-          Verifying secure access token and loading the scoped payroll evidence bundle...
+          Verifying read-only access and loading the shared payroll records...
         </p>
       </div>
     );
@@ -141,7 +143,7 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
         <div className="w-16 h-16 bg-red-500/10 rounded-2xl border border-red-500/20 flex items-center justify-center mb-6">
           <ShieldCheck size={28} className="text-red-500" />
         </div>
-        <h2 className="text-xl font-bold text-white mb-2 tracking-tight">Invalid or Revoked Link</h2>
+        <h2 className="text-xl font-bold text-white mb-2 tracking-tight">Invalid or revoked link</h2>
         <p className="text-sm text-[#a8a8aa] max-w-sm text-center">
           {error || "This auditor access link is invalid or has been revoked by the employer."}
         </p>
@@ -170,9 +172,9 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
 
       <main className="max-w-5xl mx-auto py-12 px-4 sm:px-6">
         <div className="mb-10">
-          <h1 className="text-3xl font-bold tracking-tight mb-2">Auditor Compliance Ledger</h1>
+          <h1 className="text-3xl font-bold tracking-tight mb-2">Payroll review access</h1>
           <p className="text-[#a8a8aa] text-sm">
-            Read-only transaction history for payroll review. This view is scoped for auditor access and does not grant transaction permissions.
+            Review the payroll records shared through this read-only auditor link. No funds can be moved and no data can be edited from this view.
           </p>
           {tokenMeta ? (
             <div className="mt-4 flex flex-wrap gap-3 text-xs text-[#8f8f95]">
@@ -189,23 +191,46 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
           ) : null}
         </div>
 
+        <div className="mb-8 grid gap-4 sm:grid-cols-3">
+          <div className="rounded-2xl border border-white/5 bg-[#0a0a0a] px-4 py-3">
+            <div className="text-lg font-bold text-white">{transactions.length}</div>
+            <div className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#8f8f95]">
+              Shared records
+            </div>
+          </div>
+          <div className="rounded-2xl border border-white/5 bg-[#0a0a0a] px-4 py-3">
+            <div className="text-lg font-bold text-white">${totalReviewedAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+            <div className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#8f8f95]">
+              Total reviewed amount
+            </div>
+          </div>
+          <div className="rounded-2xl border border-white/5 bg-[#0a0a0a] px-4 py-3">
+            <div className="text-lg font-bold text-white">
+              {tokenMeta ? new Date(tokenMeta.expiresAt).toLocaleDateString() : "—"}
+            </div>
+            <div className="text-[11px] font-bold uppercase tracking-[0.16em] text-[#8f8f95]">
+              Link expiry
+            </div>
+          </div>
+        </div>
+
         <div className="bg-[#0a0a0a] border border-white/5 rounded-3xl overflow-hidden shadow-2xl">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse min-w-[800px]">
               <thead className="bg-[#0f0f0f] border-b border-white/5">
                 <tr>
-                  <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Type</th>
-                  <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Recipient/Meta</th>
+                  <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Record</th>
+                  <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Notes</th>
                   <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest text-center">Amount</th>
-                  <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Date & Time</th>
+                  <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Date</th>
                   <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest">Status</th>
-                  <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest text-right">TX Hash</th>
+                  <th className="py-4 px-6 text-[10px] font-bold text-[#8f8f95] uppercase tracking-widest text-right">Reference</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className="py-24 text-center text-[#8f8f95] text-sm font-medium">Loading certified ledger...</td>
+                    <td colSpan={6} className="py-24 text-center text-[#8f8f95] text-sm font-medium">Loading shared payroll records...</td>
                   </tr>
                 ) : transactions.length === 0 ? (
                   <tr>
@@ -213,7 +238,7 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
                       <div className="w-12 h-12 rounded-2xl bg-white/5 flex items-center justify-center mx-auto mb-4">
                         <History size={20} className="text-[#a8a8aa]/40" />
                       </div>
-                      <p className="text-sm font-bold text-white tracking-tight">No transactions found</p>
+                      <p className="text-sm font-bold text-white tracking-tight">No shared records found</p>
                     </td>
                   </tr>
                 ) : (
@@ -234,7 +259,7 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
                       <td className="py-4 px-6">
                         <div className="text-sm font-bold text-white">{item.meta}</div>
                         <div className="text-[10px] text-[#1eba98] font-bold mt-0.5 flex items-center gap-1">
-                           <ShieldCheck size={10} /> Scoped auditor record
+                           <ShieldCheck size={10} /> Shared for auditor review
                         </div>
                       </td>
                       <td className="py-4 px-6 text-center">
@@ -244,12 +269,12 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
                         <div className="text-[10px] text-[#8f8f95] mt-0.5">USDC</div>
                       </td>
                       <td className="py-4 px-6 whitespace-nowrap">
-                        <span className="text-sm text-white font-medium">{new Date(item.date).toLocaleDateString(undefined, { month: '2-digit', day: '2-digit', year: 'numeric' }).replace(/\//g, '-')}</span>
+                        <span className="text-sm text-white font-medium">{new Date(item.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span>
                         <span className="text-[10px] text-[#8f8f95] ml-2">{new Date(item.date).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</span>
                       </td>
                       <td className="py-4 px-6">
                         <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-[#1eba98]/10 text-[#1eba98] text-[10px] font-bold uppercase tracking-widest">
-                          Completed
+                          {item.status || "Completed"}
                         </span>
                       </td>
                       <td className="py-4 px-6 text-right">
@@ -258,9 +283,9 @@ export default function AuditPage({ params }: { params: Promise<{ token: string 
                             href={`https://solscan.io/tx/${item.txSig}?cluster=devnet`}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-[10px] font-mono text-[#a8a8aa] hover:text-[#1eba98] transition-colors cursor-pointer hover:underline"
+                            className="text-[11px] font-semibold text-[#a8a8aa] hover:text-[#1eba98] transition-colors cursor-pointer hover:underline"
                           >
-                            {item.txSig.slice(0, 8)}...
+                            Open tx
                           </a>
                         ) : (
                           <span className="text-[10px] font-mono text-[#8f8f95]">—</span>

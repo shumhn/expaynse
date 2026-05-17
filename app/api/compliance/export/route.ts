@@ -151,9 +151,9 @@ async function buildScopedExport(args: {
       return {
         ...common,
         disclosure: {
-          level: "redacted-auditor",
+          level: "external-audit",
           note:
-            "Recipient identities are hashed. This export is designed to prove payroll activity and control flow without disclosing raw recipient addresses.",
+            "Recipient identities are hashed. This export is intended for external audit and payroll review without exposing raw recipient addresses.",
         },
         records: {
           payrollRuns: await mapPayrollRunsForAuditor(args.history.payrollRuns),
@@ -166,9 +166,9 @@ async function buildScopedExport(args: {
       return {
         ...common,
         disclosure: {
-          level: "employee-self-view",
+          level: "employee-copy",
           note:
-            "This export contains only the authenticated wallet's own setup, claim, and access records.",
+            "This export contains only the authenticated wallet's own payroll, claim, and access records.",
         },
         records: {
           setupActions: args.history.setupActions,
@@ -185,9 +185,9 @@ async function buildScopedExport(args: {
       return {
         ...common,
         disclosure: {
-          level: "owner-full",
+          level: "internal-review",
           note:
-            "This export contains the authenticated wallet's full Expaynse history and compliance access log.",
+            "This export contains the authenticated wallet's full Expaynse payroll history and compliance access log.",
         },
         records: {
           payrollRuns: args.history.payrollRuns,

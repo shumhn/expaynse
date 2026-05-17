@@ -134,9 +134,9 @@ function formatComplianceAction(action: string) {
     "auditor-token.create": "Generated auditor link",
     "auditor-token.revoke": "Revoked auditor link",
     "history.read": "Viewed activity history",
-    "compliance-export.owner.read": "Downloaded owner bundle",
-    "compliance-export.auditor.read": "Downloaded auditor bundle",
-    "compliance-export.employee.read": "Downloaded employee bundle",
+    "compliance-export.owner.read": "Downloaded internal review export",
+    "compliance-export.auditor.read": "Downloaded external audit export",
+    "compliance-export.employee.read": "Downloaded employee copy",
     "payroll-runs.statements.read.employer": "Viewed payroll statements",
     "payroll-runs.statements.read.employee": "Viewed employee statements",
   };
@@ -261,7 +261,12 @@ export function CompliancePageContent() {
         const payload = await response.json();
         const filename = `expaynse-compliance-${scope}-${new Date().toISOString().slice(0, 10)}.json`;
         downloadTextFile(filename, JSON.stringify(payload, null, 2), "application/json;charset=utf-8;");
-        toast.success(`${scope[0].toUpperCase()}${scope.slice(1)} export downloaded`);
+        const labels = {
+          owner: "Internal review export downloaded",
+          auditor: "External audit export downloaded",
+          employee: "Employee copy downloaded",
+        } as const;
+        toast.success(labels[scope]);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Failed to export compliance bundle");
       }
@@ -454,18 +459,18 @@ export function CompliancePageContent() {
               {[
                 {
                   scope: "owner" as const,
-                  title: "Owner bundle",
-                  description: "Full internal history and statement records.",
+                  title: "Internal review",
+                  description: "Full payroll records for your team and finance review.",
                 },
                 {
                   scope: "auditor" as const,
-                  title: "Auditor bundle",
-                  description: "Redacted payroll evidence for external review.",
+                  title: "External audit",
+                  description: "Redacted payroll evidence for auditors and accountants.",
                 },
                 {
                   scope: "employee" as const,
-                  title: "Employee bundle",
-                  description: "Self-view export for the connected wallet.",
+                  title: "Employee copy",
+                  description: "Personal payroll copy for the connected wallet.",
                 },
               ].map((item) => (
                 <div
